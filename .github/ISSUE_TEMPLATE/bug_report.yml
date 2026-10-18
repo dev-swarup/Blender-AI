@@ -1,0 +1,36 @@
+name: Bug report
+description: Something in Blender AI doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you typed, what you expected, and what happened instead. Screenshots of the prompt bar and the Steps panel help a lot.
+    validations:
+      required: true
+  - type: input
+    id: blender
+    attributes:
+      label: Blender version
+      placeholder: "5.2.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system / zip
+      options: [windows-x64, macos-arm64, macos-x64, linux-x64]
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and Base URL type
+      placeholder: "claude-opus-5-5 on api.anthropic.com (or: a gateway)"
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Window > Toggle System Console (Windows), or run Blender from a terminal. Remove API keys before pasting.
+      render: text

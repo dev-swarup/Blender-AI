@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: scripts/requirements-vendor.txt
+      - name: Install dependencies
+        run: pip install pytest ruff numpy -r scripts/requirements-vendor.txt
+      - name: Lint
+        run: ruff check blender_ai tests scripts
+      - name: Format
+        run: ruff format --check blender_ai tests scripts
+      - name: Unit tests
+        run: pytest
+
+  blender-headless:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        blender: ["4.2.0", "5.2.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libsm6
+      - name: Download Blender ${{ matrix.blender }}
+        env:
+          BLENDER_VERSION: ${{ matrix.blender }}
+        run: |
+          series="${BLENDER_VERSION%.*}"
+          curl -fsSL "https://download.blender.org/release/Blender${series}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar -xJ
+          echo "BLENDER=$PWD/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
+      - name: Tool suite
+        run: '"$BLENDER" -b --factory-startup --python-exit-code 1 --python tests/run_tools.py'

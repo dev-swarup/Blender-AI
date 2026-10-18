@@ -1,0 +1,21 @@
+name: Feature or tool request
+description: A new tool, helper integration or UI improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What do you want to make or do?
+      description: Describe the result you're after in Blender terms (e.g. "retopologise a sculpt", "add cloth to a character").
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What happens today
+      description: Does the model fail, take a long route, or fall back to run_python?
+  - type: textarea
+    id: idea
+    attributes:
+      label: Suggested tool or approach
+      description: Optional. A typed tool's name, inputs, and which Blender API it would use.
