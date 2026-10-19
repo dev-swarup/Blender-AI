@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import bpy
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, StringProperty
 
 from .. import state
 from ..agent.messages import Phase
@@ -127,11 +127,11 @@ def open_helpers_prompt_later() -> None:
         bpy.app.timers.register(open_helpers_prompt, first_interval=1.5)
 
 
-def _helpers_finished(missing: list[str]) -> None:
+def _helpers_finished(missing: list[str], errors: list[str]) -> None:
     session = state.get().session
     if session is not None:
-        text = f"Couldn't install {', '.join(missing)}; see the Info editor." if missing else "Helper add-ons installed and enabled."
-        session.notify(text, error=bool(missing))
+        reason = f": {errors[0]}" if errors else "; see the Info editor."
+        session.notify(f"Couldn't install {', '.join(missing)}{reason}" if missing else "Helper add-ons installed and enabled.", error=bool(missing))
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
             area.tag_redraw()
@@ -143,9 +143,17 @@ class BLENDER_AI_OT_install_helpers(bpy.types.Operator):
     bl_description = "Install and enable the add-ons Blender AI builds with: Rigify, MPFB, LoopTools and Extra Mesh Objects"
     bl_options = {"INTERNAL"}
 
+    use_rigify: BoolProperty(name="Rigify", default=True, options={"SKIP_SAVE"})
+    use_mpfb: BoolProperty(name="MPFB", default=True, options={"SKIP_SAVE"})
+    use_looptools: BoolProperty(name="LoopTools", default=True, options={"SKIP_SAVE"})
+    use_extra_objects: BoolProperty(name="Extra Mesh Objects", default=True, options={"SKIP_SAVE"})
+
     @classmethod
     def poll(cls, context: Any) -> bool:
         return bool(helpers.missing())
+
+    def selected(self) -> set[str]:
+        return {h.id for h in helpers.missing() if getattr(self, f"use_{h.id}")}
 
     def invoke(self, context: Any, event: Any) -> set[str]:
         wm = context.window_manager
@@ -161,9 +169,11 @@ class BLENDER_AI_OT_install_helpers(bpy.types.Operator):
         for helper in helpers.HELPERS.values():
             ready = helpers.enabled_module(helper.id) is not None
             source = "included with Blender" if helper.bundled else f"extensions.blender.org, {helper.size}"
-            col.label(text=f"{helper.name}: {'enabled' if ready else source}", icon="CHECKBOX_HLT" if ready else "CHECKBOX_DEHLT")
+            row = col.row()
+            row.enabled = not ready
+            row.prop(self, f"use_{helper.id}", text=f"{helper.name}: {'enabled' if ready else source}")
         col = layout.column(align=True)
-        col.label(text="Install downloads the missing ones from extensions.blender.org and enables them all.", icon="INFO")
+        col.label(text="Install downloads the ticked add-ons from extensions.blender.org and enables them.", icon="INFO")
         col.label(text="Cancel skips this; you can install them later in Blender AI's preferences.")
 
     def execute(self, context: Any) -> set[str]:
@@ -172,16 +182,19 @@ class BLENDER_AI_OT_install_helpers(bpy.types.Operator):
         prefs = _prefs()
         if prefs is not None:
             prefs.helpers_prompted = True
+        ids = self.selected()
+        if not ids:
+            self.report({"INFO"}, "Nothing ticked to install.")
+            return {"CANCELLED"}
         try:
-            enabled, downloading = installer.install(interactive=context.window is not None)
+            enabled, downloading = installer.install(ids, interactive=context.window is not None, on_done=_helpers_finished)
         except installer.InstallError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         if downloading:
-            installer.watch(_helpers_finished)
             self.report({"INFO"}, (f"Enabled {', '.join(enabled)}. " if enabled else "") + f"Installing {', '.join(downloading)}…")
         else:
-            _helpers_finished([h.name for h in helpers.missing()])
+            _helpers_finished([h.name for h in helpers.missing() if h.id in ids], [])
         return {"FINISHED"}
 
     def cancel(self, context: Any) -> None:

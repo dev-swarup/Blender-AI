@@ -102,8 +102,8 @@ over it to upgrade.
 
 With online access on, Blender AI asks once whether to install its helper add-ons: Rigify (included with
 Blender), MPFB, LoopTools and Extra Mesh Objects. They are downloaded through Blender's own extension
-system from extensions.blender.org (about 46 MB, mostly MPFB). You can skip the prompt and install them later from the
-add-on's preferences.
+system from extensions.blender.org (about 46 MB, mostly MPFB). Untick any you don't want, then click
+**Install**. You can skip the prompt and install them later from the add-on's preferences.
 
 ![Install helper add-ons](docs/screenshots/helpers_dialog.png)
 
@@ -246,7 +246,7 @@ The essentials are provider, URL, key and model. Everything else has defaults un
 | Prompt bar shortcut | Ctrl+Space | Rebindable |
 
 **Helper add-ons** lists Rigify, MPFB, LoopTools and Extra Mesh Objects with their status;
-**Install helper add-ons** installs and enables any that are missing.
+**Install helper add-ons** opens the same list, where you tick the ones to install.
 
 Environment variables `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`
 are used as fallbacks. The complete tool reference is in [docs/tools.md](docs/tools.md).

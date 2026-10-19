@@ -457,13 +457,13 @@ def helpers_installer_enables_and_explains() -> None:
     pending = [h.name for h in installer.downloads()]
     if pending and not bpy.app.online_access:
         try:
-            installer.install(interactive=False)
+            installer.install(set(integrations.HELPERS), interactive=False)
         except installer.InstallError as exc:
             assert "Online access is off" in str(exc), exc
         else:
             raise AssertionError(f"downloading {pending} offline should fail with a clear message")
     elif not pending:
-        installer.install(interactive=False)
+        installer.install(set(integrations.HELPERS), interactive=False)
     ready = {h.id for h in integrations.HELPERS.values()} - {h.id for h in integrations.missing()}
     installed = {h.id for h in integrations.HELPERS.values() if integrations.installed_module(h.id)}
     assert installed <= ready, f"installed helpers must end up enabled: {installed - ready}"
