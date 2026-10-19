@@ -38,6 +38,9 @@ class LogEntry:
     destructive: bool = False
     expanded: bool = False
     agent: str = ""
+    result: str = ""
+    started: float = 0.0
+    updated: float = 0.0
 
 
 @dataclass

@@ -10,9 +10,9 @@ any OpenAI-compatible provider and with Anthropic.
 ![The Blender AI prompt bar after building a crate](docs/screenshots/bar_done.png)
 
 Blender AI is a free, open-source extension for Blender 4.2 LTS and later. Each tab of the bar is an
-agent with its own conversation, instructions and toolset. Agents call high-level tools, fall back to
-full `bpy` Python, use any MCP servers you connect, and delegate self-contained parts of a job to
-sub-agents that run in parallel. Every step is logged as it happens, every step is a single undo, and
+agent with its own instructions and toolset, and the tabs share one conversation, so follow-ups keep
+their context. Agents call high-level tools, fall back to full `bpy` Python, use any MCP servers you
+connect, and delegate self-contained parts of a job to sub-agents that run in parallel. Every step is logged as it happens, every step is a single undo, and
 agents inspect the viewport to verify their own work.
 
 The screenshots in this document are produced by `tests/ui_smoke.py` against a scripted local API, so the
@@ -45,11 +45,13 @@ step logs show scripted replies rather than live model output.
 - **Models from your API.** The model and image-model pickers list what your provider's `/models`
   endpoint returns, with search. Nothing is hard-coded.
 - **Four specialist agents.** Model Builder, Scene Builder, Animator and Material Generator, each with
-  its own conversation, instructions and tools.
+  its own instructions and tools, sharing one conversation.
+- **Follow-ups keep their context.** Build something, then ask for a change ("taller legs", "make it oak")
+  in any tab. Long conversations are summarized automatically when they near the model's context window.
 - **Parallel sub-agents.** An agent can hand independent parts of a job to other specialists that work
   at the same time, for example one Model Builder per house in a village.
-- **Native-looking UI.** Tabs, a multi-line prompt, model, reasoning and image-model dropdowns, and a
-  Generate button. Colors, rounding and sizes follow your Blender theme and UI scale.
+- **Native-looking UI.** Tabs, a chat and a multi-line prompt in one bar, model, reasoning and image-model
+  dropdowns, and a Submit button. Colors, rounding and sizes follow your Blender theme and UI scale.
 - **High-level tools.** Whole jobs in one call: scattering with geometry nodes, rigid-body and cloth
   physics, curves and 3D text, Rigify rigs, walk cycles, camera moves, PBR materials. Anything else
   falls back to Python with full `bpy` access.
@@ -141,7 +143,7 @@ The model must support **tool calling**. Most current models do.
 ## Usage
 
 Press **Ctrl+Space** in the 3D Viewport (or click the bar), type a request, and press **Enter** or click
-**Generate**.
+**Submit**.
 
 | Tab | Example |
 |---|---|
@@ -150,26 +152,39 @@ Press **Ctrl+Space** in the 3D Viewport (or click the bar), type a request, and 
 | Animation | `Rig this character with Rigify and make it walk in a circle` |
 | Material | `Make the floor polished concrete with subtle cracks` |
 
-While an agent works, the step log above the bar shows its reasoning and each tool call with its result;
-click a row to expand it. Press **Esc** or **Stop** to interrupt. Every step is one undo step.
+The conversation appears inside the bar, above the text you type, as a compact chat: three lines tall
+when idle and six while you type or an agent works, so the model stays in view (click the chat's
+background for a taller view). It shows your messages, the agent's replies, a *Thinking…* line while it
+reasons, and each tool call with its result on the line below. Sub-agents fold into one line with their
+step count. Scroll it with the mouse wheel; while you read older lines it stays put, and **Latest** jumps
+back to the end. Click a line to expand it (a tool's full input and result, the reasoning, or a
+sub-agent's steps). The top line shows the tokens used so far. Press **Esc** or **Stop** to interrupt.
+Every step is one undo step.
+
+Keep talking in the same conversation: after a build, ask for changes ("make the legs taller", "now a
+matching table") and the agent edits what it made. The four tabs share the conversation, so you can
+build in **3D Model** and texture in **Material** without repeating yourself. Each message also carries a
+fresh scene summary, so the agent notices what you changed by hand. When the conversation nears the
+model's context window, earlier turns are summarized automatically and the chat says so. **New
+Conversation** in the sidebar starts over.
 
 ![A request in progress](docs/screenshots/bar_running.png)
 
 | Control | Function |
 |---|---|
-| Tabs | Select the agent. Each tab keeps its own conversation. |
+| Tabs | Select the agent. The tabs share one conversation. |
 | **+** | Attach a reference image (click again to remove). Texture tools can use it. |
 | Model | Pick the AI model. Type to filter the list from your API; ↑/↓ and Enter also work. |
-| Reasoning | Auto, Low, Medium or High. Auto uses the model's default. |
+| Reasoning | Auto plus the model's effort levels (Off, Minimal, Low, Medium, High, Extra high, Max). Auto uses the model's default. Levels come from your API's model list when it gives them; otherwise from the model family (GPT-5, Claude), or Low / Medium / High. Hidden when the list says the model doesn't reason. A level the API rejects is dropped for that model, and the chat says which one it used instead. |
 | Image model | The model used for generated textures. |
 | ⚙ | Quick settings: provider, models, viewport screenshots, Python confirmation, *All Settings…* |
-| Generate / Stop | Send the request, or stop it while it runs. |
+| Submit / Stop | Send the request, or stop it while it runs. |
 
 ![The model dropdown, filtered by typing](docs/screenshots/dropdown_model.png)
 
 | Key (while typing) | Action |
 |---|---|
-| Enter / Shift+Enter | Generate / new line |
+| Enter / Shift+Enter | Submit / new line |
 | Esc or Ctrl+Space | Leave the bar |
 | Tab | Next tab |
 | ↑ / ↓ | Move between lines, then through earlier prompts |

@@ -75,7 +75,6 @@ def submit(context: Any) -> None:
 
 REFRESH = "__refresh__"
 ON_RELEASE = ("gear", "attach")
-REASONING_HINTS = {"auto": "model default", "low": "fastest", "medium": "balanced", "high": "most careful"}
 
 
 def _list_items(listed: Any, chosen: list[Any], current: str, empty: str) -> list[Item]:
@@ -101,7 +100,12 @@ def dropdown_items(target: str) -> list[Item]:
         return _list_items(st.chat_models, models.chat_models(st.chat_models.models), prefs.model(), "No models yet. Add your API key in settings (gear).")
     if target == "image":
         return _list_items(st.image_models, models.image_models(st.image_models.models), prefs.image_model, "This API lists no image models.")
-    return [Item(level, models.LEVEL_LABELS[level], REASONING_HINTS.get(level, ""), level == prefs.reasoning) for level in models.REASONING_LEVELS]
+    info = prefs.model_info()
+    levels = prefs.reasoning_levels()
+    chosen = models.effective_effort(prefs.reasoning, levels)
+    default = f"model default ({models.LEVEL_LABELS[info.default_effort]})" if info is not None and info.default_effort else "model default"
+    items = [Item("auto", "Auto", default, chosen == "auto")]
+    return items + [Item(level, models.LEVEL_LABELS[level], models.LEVEL_HINTS[level], level == chosen) for level in levels]
 
 
 def open_dropdown(context: Any, target: str, region: Any) -> None:
@@ -204,6 +208,8 @@ def handle_click(context: Any, hit: str, region: Any = None) -> bool:
             if entry.id == entry_id:
                 entry.expanded = not entry.expanded
                 break
+    elif hit == "log_latest":
+        st.ui.log_scroll.to_latest()
     elif hit == "log":
         st.ui.expanded_log = not st.ui.expanded_log
     _redraw(context)
@@ -266,7 +272,7 @@ class BLENDER_AI_OT_prompt_input(bpy.types.Operator):
                 return handled
         if event.type in {"MOUSEMOVE", "INBETWEEN_MOUSEMOVE"}:
             hit, _area, _region = overlay.hit_test(context, event)
-            hover = hit if hit in ("model", "image", "reasoning", "gear", "attach") else None
+            hover = hit if hit in ("model", "image", "reasoning", "gear", "attach", "send") else None
             if hover != st.ui.hover:
                 st.ui.hover = hover
                 _redraw(context)
@@ -446,6 +452,32 @@ class BLENDER_AI_OT_bar_click(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class BLENDER_AI_OT_log_scroll(bpy.types.Operator):
+    bl_description = "Scroll the Blender AI transcript"
+    bl_idname = "blender_ai.log_scroll"
+    bl_label = "Blender AI: Scroll Transcript"
+    bl_options = {"INTERNAL"}
+
+    def invoke(self, context: Any, event: Any) -> set[str]:
+        st = state.get()
+        found = overlay.region_at(context, event.mouse_x, event.mouse_y)
+        bar = st.ui.layouts.get(found[1].as_pointer()) if found is not None else None
+        if bar is None or bar.log_view is None or bar.log_panel is None:
+            return PASS
+        if not bar.log_panel.contains(event.mouse_x - found[1].x, event.mouse_y - found[1].y):
+            return PASS
+        step = overlay.scroll_step()
+        if event.type == "WHEELUPMOUSE":
+            delta = step
+        elif event.type == "WHEELDOWNMOUSE":
+            delta = -step
+        else:
+            delta = float(event.mouse_y - event.mouse_prev_y)
+        st.ui.log_scroll.scroll(delta, bar.log_view.h)
+        _redraw(context)
+        return {"FINISHED"}
+
+
 class BLENDER_AI_OT_escape(bpy.types.Operator):
     bl_description = "Stop the running Blender AI request"
     bl_idname = "blender_ai.escape"
@@ -477,7 +509,7 @@ class BLENDER_AI_OT_approve(bpy.types.Operator):
         return {"FINISHED"}
 
 
-CLASSES = (BLENDER_AI_OT_prompt_input, BLENDER_AI_OT_focus_bar, BLENDER_AI_OT_bar_click, BLENDER_AI_OT_escape, BLENDER_AI_OT_approve)
+CLASSES = (BLENDER_AI_OT_prompt_input, BLENDER_AI_OT_focus_bar, BLENDER_AI_OT_bar_click, BLENDER_AI_OT_log_scroll, BLENDER_AI_OT_escape, BLENDER_AI_OT_approve)
 
 
 def register_keymaps() -> None:
@@ -490,6 +522,9 @@ def register_keymaps() -> None:
         ("blender_ai.focus_bar", "SPACE", "PRESS", {"ctrl": True}),
         ("blender_ai.bar_click", "LEFTMOUSE", "PRESS", {}),
         ("blender_ai.bar_click", "LEFTMOUSE", "RELEASE", {}),
+        ("blender_ai.log_scroll", "WHEELUPMOUSE", "PRESS", {}),
+        ("blender_ai.log_scroll", "WHEELDOWNMOUSE", "PRESS", {}),
+        ("blender_ai.log_scroll", "TRACKPADPAN", "ANY", {}),
         ("blender_ai.escape", "ESC", "PRESS", {}),
     ):
         kmi = km.keymap_items.new(idname, key, value, **kwargs)

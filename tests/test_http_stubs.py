@@ -24,7 +24,7 @@ from blender_ai.agent.loop import AgentSession
 from blender_ai.agent.mcp_bridge import MCPManager, ServerConfig, parse_config_json
 from blender_ai.agent.messages import LogKind
 from blender_ai.imaging import client as image_api
-from blender_ai.tools.registry import ImagePart, ToolOutput
+from blender_ai.tools.registry import ImagePart, Mode, ToolOutput
 
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
 
@@ -105,6 +105,8 @@ class Handler(BaseHTTPRequestHandler):
     chat: list[str] = []
     messages: list[bytes] = []
     route: Any = None
+    reject_efforts: frozenset[str] = frozenset()
+    summary = "The user asked for a chair; Chair exists at the origin."
 
     def log_message(self, *args: Any) -> None: ...
 
@@ -154,6 +156,15 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if not body.get("stream"):
+                message = {"role": "assistant", "content": Handler.summary}
+                usage = {"prompt_tokens": 40, "completion_tokens": 9, "total_tokens": 49}
+                choice = {"index": 0, "message": message, "finish_reason": "stop"}
+                self._json(200, {"id": "x", "object": "chat.completion", "created": 1, "model": body["model"], "choices": [choice], "usage": usage})
+                return
+            if body.get("reasoning_effort") in Handler.reject_efforts:
+                self._json(400, {"error": {"message": f"reasoning_effort '{body['reasoning_effort']}' is not supported by this model"}})
+                return
             has_image = "image_url" in json.dumps(body["messages"])
             if body["model"] == "no-vision" and has_image:
                 self._json(400, {"error": {"message": "image_url is not supported by this model"}})
@@ -165,6 +176,16 @@ class Handler(BaseHTTPRequestHandler):
             self._stream(Handler.chat.pop(0).encode())
         elif path == "/v1/messages":
             Handler.seen[-1]["body"] = body = json.loads(raw)
+            if not body.get("stream"):
+                content = [{"type": "text", "text": Handler.summary}]
+                reply = {"id": "msg", "type": "message", "role": "assistant", "model": body["model"], "content": content, "stop_reason": "end_turn"}
+                self._json(200, {**reply, "stop_sequence": None, "usage": {"input_tokens": 40, "output_tokens": 9}})
+                return
+            effort = body.get("output_config", {}).get("effort")
+            if effort in Handler.reject_efforts:
+                message = f"effort '{effort}' is not supported by this model"
+                self._json(400, {"type": "error", "error": {"type": "invalid_request_error", "message": message}})
+                return
             if Handler.route is not None:
                 time.sleep(0.3)
                 self._stream(Handler.route(body))
@@ -188,6 +209,20 @@ def server() -> Iterator[str]:
     httpd.shutdown()
 
 
+ALL_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+@pytest.fixture(autouse=True)
+def fresh_rejections() -> Any:
+    models.forget_rejections()
+    yield
+    models.forget_rejections()
+
+
+def listed(model_id: str, *efforts: str) -> models.ModelInfo:
+    return models.ModelInfo(model_id, efforts=efforts)
+
+
 def run_session(host: FakeHost, text: str, attachment: ImagePart | None = None) -> AgentSession:
     bridge = Bridge()
     session = AgentSession(host, bridge, catalog=catalog())
@@ -204,7 +239,7 @@ def test_openai_agent_runs_tools_and_sends_screenshots(server: str) -> None:
     Handler.seen.clear()
     Handler.chat[:] = [CHAT_TOOL, CHAT_DONE]
     host = FakeHost()
-    host.cfg = AgentConfig("OPENAI", server, "sk-test", "model-a", reasoning="high")
+    host.cfg = AgentConfig("OPENAI", server, "sk-test", "model-a", reasoning="high", model_info=listed("model-a", "low", "medium", "high"))
     session = run_session(host, "make a cube")
     assert host.executed == ["make"], [e.text for e in session.log]
     first, second = chat_requests()
@@ -232,6 +267,59 @@ def test_openai_agent_retries_without_images(server: str) -> None:
     assert "image_url" not in json.dumps(chat_requests()[-1]["messages"])
 
 
+def test_openai_agent_steps_down_from_unsupported_effort(server: str) -> None:
+    Handler.seen.clear()
+    Handler.chat[:] = [CHAT_DONE]
+    Handler.reject_efforts = frozenset({"max", "xhigh"})
+    host = FakeHost()
+    host.cfg = AgentConfig("OPENAI", server, "sk-test", "model-a", reasoning="max", model_info=listed("model-a", *ALL_EFFORTS))
+    try:
+        session = run_session(host, "think hard")
+    finally:
+        Handler.reject_efforts = frozenset()
+    assert [b.get("reasoning_effort") for b in chat_requests()] == ["max", "xhigh", "high"]
+    notes = [e.text for e in session.log if e.kind is LogKind.INFO]
+    assert any("using Extra high" in n for n in notes) and any("using High" in n for n in notes), notes
+    assert [e.text for e in session.log if e.kind is LogKind.ASSISTANT] == ["Done."]
+
+
+def test_reasoning_without_listed_levels(server: str) -> None:
+    def effort(info: models.ModelInfo, model: str = "model-a") -> Any:
+        Handler.seen.clear()
+        Handler.chat[:] = [CHAT_DONE]
+        host = FakeHost()
+        host.cfg = AgentConfig("OPENAI", server, "sk-test", model, reasoning="max", model_info=info)
+        session = run_session(host, "hello")
+        return chat_requests()[-1].get("reasoning_effort"), [e.text for e in session.log if e.kind is LogKind.INFO]
+
+    assert effort(listed("model-a", "low", "medium", "high"))[0] == "high", "the nearest listed level"
+    assert effort(listed("model-a"))[0] == "high", "nothing listed: the standard levels"
+    assert effort(models.ModelInfo("model-a", reasoning=False))[0] is None, "the listing says the model has no reasoning"
+    assert effort(models.ModelInfo("gpt-5.2"), "gpt-5.2")[0] == "xhigh", "a known family without a listing"
+    Handler.reject_efforts = frozenset({"high"})
+    try:
+        sent, notes = effort(models.ModelInfo("plain-model"), "plain-model")
+    finally:
+        Handler.reject_efforts = frozenset()
+    assert sent is None and any("using its default" in n for n in notes), "a server that takes no effort is remembered"
+    assert models.offered_efforts("OPENAI", "plain-model", None, models.effort_key(server, "plain-model")) == ()
+
+
+def test_anthropic_agent_steps_down_from_unsupported_effort(server: str) -> None:
+    Handler.seen.clear()
+    Handler.messages[:] = [anthropic_message([{"type": "text", "text": "Done."}], "end_turn")]
+    Handler.reject_efforts = frozenset({"max"})
+    host = FakeHost()
+    host.cfg = AgentConfig("ANTHROPIC", server, "ak-test", "claude-opus-5-5", reasoning="max", model_info=listed("claude-opus-5-5", *ALL_EFFORTS))
+    try:
+        session = run_session(host, "think hard")
+    finally:
+        Handler.reject_efforts = frozenset()
+    efforts = [s["body"]["output_config"]["effort"] for s in Handler.seen if s["path"] == "/v1/messages"]
+    assert efforts == ["max", "xhigh"]
+    assert [e.text for e in session.log if e.kind is LogKind.ASSISTANT] == ["Done."]
+
+
 def test_anthropic_agent_replays_thinking_and_results(server: str) -> None:
     Handler.seen.clear()
     Handler.messages[:] = [
@@ -246,7 +334,7 @@ def test_anthropic_agent_replays_thinking_and_results(server: str) -> None:
         anthropic_message([{"type": "text", "text": "Done."}], "end_turn"),
     ]
     host = FakeHost()
-    host.cfg = AgentConfig("ANTHROPIC", server, "ak-test", "claude-opus-5-5", reasoning="high")
+    host.cfg = AgentConfig("ANTHROPIC", server, "ak-test", "claude-opus-5-5", reasoning="high", model_info=listed("claude-opus-5-5", *ALL_EFFORTS))
     session = run_session(host, "make a cube")
     assert host.executed == ["make"], [e.text for e in session.log]
     first, second = (s["body"] for s in Handler.seen if s["path"] == "/v1/messages")
@@ -258,6 +346,81 @@ def test_anthropic_agent_replays_thinking_and_results(server: str) -> None:
     assert results[0]["type"] == "tool_result" and results[0]["content"][0]["text"] == "made cube"
     assert results[-1]["type"] == "image", "viewport screenshot after a scene change"
     assert Handler.seen[0]["headers"]["x-api-key"] == "ak-test"
+
+
+def conversation(host: FakeHost) -> tuple[AgentSession, Any]:
+    bridge = Bridge()
+    session = AgentSession(host, bridge, catalog=catalog())
+
+    def say(text: str) -> None:
+        session.submit(text)
+        pump(bridge, lambda: not session.busy, timeout=30)
+
+    return session, say
+
+
+def anthropic_requests() -> list[dict[str, Any]]:
+    return [s["body"] for s in Handler.seen if s["path"] == "/v1/messages" and s["body"].get("stream")]
+
+
+def test_openai_follow_ups_keep_the_conversation_across_tabs(server: str) -> None:
+    Handler.seen.clear()
+    Handler.chat[:] = [CHAT_DONE, CHAT_DONE]
+    host = FakeHost()
+    host.cfg = AgentConfig("OPENAI", server, "sk-test", "model-a")
+    session, say = conversation(host)
+    say("build a chair")
+    session.set_mode(Mode.MATERIAL)
+    say("make it oak")
+    first, second = chat_requests()
+    texts = json.dumps(second["messages"])
+    assert "Material Generator" in second["messages"][0]["content"] and "Model Builder" in first["messages"][0]["content"]
+    assert [m["role"] for m in second["messages"]] == ["system", "user", "assistant", "user"]
+    assert "build a chair" in texts and "Done." in texts and "make it oak" in texts
+
+
+def test_anthropic_follow_ups_keep_thinking_until_the_tab_changes(server: str) -> None:
+    Handler.seen.clear()
+    thought = [{"type": "thinking", "thinking": "Plan.", "signature": "sig-1"}, {"type": "text", "text": "Done."}]
+    Handler.messages[:] = [anthropic_message(thought, "end_turn") for _ in range(3)]
+    host = FakeHost()
+    host.cfg = AgentConfig("ANTHROPIC", server, "ak-test", "claude-opus-5-5", model_info=listed("claude-opus-5-5", *ALL_EFFORTS))
+    session, say = conversation(host)
+    say("build a chair")
+    say("taller legs")
+    session.set_mode(Mode.MATERIAL)
+    say("make it oak")
+    _first, second, third = anthropic_requests()
+    assert [m["role"] for m in third["messages"]] == ["user", "assistant", "user", "assistant", "user"]
+    assert second["messages"][1]["content"][0]["type"] == "thinking", "same tab: the history is append-only"
+    kinds = [b["type"] for m in third["messages"] if m["role"] == "assistant" for b in m["content"]]
+    assert "thinking" not in kinds and "text" in kinds, "a new system prompt and tool set start without old thinking"
+    assert "build a chair" in json.dumps(third["messages"]) and "Material Generator" in third["system"][0]["text"]
+
+
+@pytest.mark.parametrize("provider", ["OPENAI", "ANTHROPIC"])
+def test_long_conversations_are_compacted(server: str, provider: str) -> None:
+    Handler.seen.clear()
+    Handler.chat[:] = [CHAT_DONE, CHAT_DONE]
+    Handler.messages[:] = [anthropic_message([{"type": "text", "text": "Done."}], "end_turn") for _ in range(2)]
+    host = FakeHost()
+    model = "claude-opus-5-5" if provider == "ANTHROPIC" else "model-a"
+    host.cfg = AgentConfig(provider, server, "key", model, model_info=models.ModelInfo(model, context=2000))
+    session, say = conversation(host)
+    say("build a chair " + "with carved details " * 400)
+    say("now a table")
+    if provider == "ANTHROPIC":
+        summary_request, main = [s["body"] for s in Handler.seen if s["path"] == "/v1/messages"][1:]
+        turns = main["messages"]
+    else:
+        summary_request, main = chat_requests()[1:]
+        turns = main["messages"][1:]
+    assert "<transcript>" in json.dumps(summary_request) and "build a chair" in json.dumps(summary_request)
+    assert len(turns) == 1 and turns[0]["role"] == "user", "the old turns are replaced by the summary"
+    sent = json.dumps(turns[0])
+    assert "<conversation_summary>" in sent and "Chair exists" in sent and "now a table" in sent
+    assert any("Compacted the conversation" in e.text for e in session.log if e.kind is LogKind.INFO)
+    assert session.usage.turns == 3
 
 
 def tool_calls(*calls: tuple[str, str, dict[str, Any]]) -> str:

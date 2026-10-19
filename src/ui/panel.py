@@ -40,6 +40,19 @@ class BLENDER_AI_MT_presets(bpy.types.Menu):
             op.provider, op.url = provider, url
 
 
+class BLENDER_AI_MT_reasoning(bpy.types.Menu):
+    bl_idname = "BLENDER_AI_MT_reasoning"
+    bl_label = "Reasoning"
+
+    def draw(self, context: Any) -> None:
+        from ..preferences import get_prefs
+
+        prefs = get_prefs()
+        if prefs is not None:
+            for level in ("auto", *prefs.reasoning_levels()):
+                self.layout.prop_enum(prefs, "reasoning", level)
+
+
 class BLENDER_AI_UL_mcp_servers(bpy.types.UIList):
     bl_idname = "BLENDER_AI_UL_mcp_servers"
 
@@ -177,18 +190,19 @@ class BLENDER_AI_PT_log(bpy.types.Panel):
                 label = f"{entry.agent.split(' · ', 1)[-1]} › {label}"
             row.alert = entry.status is Status.ERROR or entry.destructive
             row.label(text=label[:70], icon=icon)
-            if entry.detail:
+            body = "\n".join(part for part in (entry.detail.strip(), entry.result.strip()) if part)
+            if body:
                 op = row.operator("blender_ai.toggle_entry", text="", icon="DISCLOSURE_TRI_DOWN" if entry.expanded else "DISCLOSURE_TRI_RIGHT", emboss=False)
                 op.entry_id = entry.id
                 if entry.expanded:
-                    for line in entry.detail.strip().splitlines()[:16]:
+                    for line in body.splitlines()[:16]:
                         col.label(text="    " + line[:90])
         usage = session.usage
         layout.label(text=f"{usage.turns} requests · {usage.input_tokens:,} in · {usage.output_tokens:,} out", icon="INFO")
         layout.operator("blender_ai.clear_log", icon="TRASH")
 
 
-CLASSES = (BLENDER_AI_MT_presets, BLENDER_AI_UL_mcp_servers, BLENDER_AI_PT_quick_settings, BLENDER_AI_PT_main, BLENDER_AI_PT_log)
+CLASSES = (BLENDER_AI_MT_presets, BLENDER_AI_MT_reasoning, BLENDER_AI_UL_mcp_servers, BLENDER_AI_PT_quick_settings, BLENDER_AI_PT_main, BLENDER_AI_PT_log)
 
 
 def register() -> None:

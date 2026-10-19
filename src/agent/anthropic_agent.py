@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from .. import models
 from ..providers import ANTHROPIC_URL
 from ..tools.registry import ImagePart, ToolSpec
+from . import history
 from .config import AgentConfig
 from .messages import AgentError, AgentEvent, ToolResult, UserTurn
 
@@ -38,11 +39,11 @@ def tool_param(spec: ToolSpec) -> dict[str, Any]:
     return {"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
 
 
-def build_request(cfg: AgentConfig, *, system: str, tools: Sequence[ToolSpec], messages: list[dict[str, Any]]) -> dict[str, Any]:
+def build_request(cfg: AgentConfig, *, system: str, tools: Sequence[ToolSpec], messages: list[dict[str, Any]], level: str | None = None) -> dict[str, Any]:
     caps = models.anthropic_caps(cfg.model, cfg.model_info)
     official = is_official(cfg.base_url)
     params: dict[str, Any] = {"model": cfg.model, "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}], "messages": messages}
-    params.update(models.anthropic_params(caps, cfg.reasoning))
+    params.update(models.anthropic_params(caps, level or cfg.reasoning))
     tool_params = [tool_param(s) for s in tools]
     if official:
         for t in tool_params:
@@ -114,7 +115,7 @@ class AnthropicAgent:
         self.messages: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._client: Any = None
-        self._last_model = ""
+        self._prefix: tuple[Any, ...] | None = None
 
     @property
     def has_history(self) -> bool:
@@ -123,6 +124,7 @@ class AnthropicAgent:
     def reset(self) -> None:
         with self._lock:
             self.messages = []
+            self._prefix = None
 
     def run(self, run: Any, turn: UserTurn) -> str:
         with self._lock:
@@ -130,60 +132,103 @@ class AnthropicAgent:
             self.cfg = cfg
             if self._client is None:
                 self._client = sdk_client(cfg)
-            if self._last_model and cfg.model != self._last_model:
+            prefix = (cfg.model, run.system, tuple(s.name for s in run.tools))
+            if self._prefix is not None and prefix != self._prefix:
                 self._drop_thinking()
-            self._last_model = cfg.model
-            vision = cfg.vision
+            self._prefix = prefix
 
             content: list[dict[str, Any]] = []
+            if history.needs_compaction(self.messages, cfg.context_window) and (summary := self._compact(run, cfg)):
+                content.append({"type": "text", "text": history.summary_turn(summary)})
             if turn.snapshot:
                 content.append({"type": "text", "text": f"<scene>\n{turn.snapshot}\n</scene>"})
-            if turn.attachment is not None and vision:
+            if turn.attachment is not None and cfg.vision:
                 content.append(image_block(turn.attachment))
             content.append({"type": "text", "text": turn.text})
             self.messages.append({"role": "user", "content": content})
+            note = history.FAILED
+            try:
+                reply = self._loop(run, cfg)
+                note = history.STOPPED
+                return reply
+            except AgentError as exc:
+                note = history.PAUSED if exc.kind == "paused" else history.FAILED
+                raise
+            finally:
+                self._close(history.STOPPED if run.cancelled else note)
 
-            steps = 0
-            turn_no = 0
-            while not run.cancelled:
-                if steps >= cfg.max_steps:
-                    raise AgentError(f"Paused after {steps} steps (the limit in settings). Send a message to continue.", "paused")
-                steps += 1
-                turn_no += 1
-                params = build_request(cfg, system=run.system, tools=run.tools, messages=list(self.messages))
+    def _loop(self, run: Any, cfg: AgentConfig) -> str:
+        vision = cfg.vision
+        steps = 0
+        turn_no = 0
+        while not run.cancelled:
+            if steps >= cfg.max_steps:
+                raise AgentError(f"Paused after {steps} steps (the limit in settings). Send a message to continue.", "paused")
+            steps += 1
+            turn_no += 1
+            level = cfg.effort()
+            params = build_request(cfg, system=run.system, tools=run.tools, messages=list(self.messages), level=level)
+            try:
                 message = self._stream(params, run, turn_no)
-                if message is None:
-                    return ""
-                blocks = [block.to_dict() for block in message.content]
-                self.messages.append({"role": "assistant", "content": blocks})
-                usage = getattr(message, "usage", None)
-                if usage is not None:
-                    run.emit(AgentEvent("usage", usage=usage.to_dict()))
+            except AgentError as exc:
+                if exc.kind != "bad_request" or "effort" not in str(exc).lower() or level == "auto":
+                    raise
+                run.emit(AgentEvent("info", text=cfg.reject_effort(level)))
+                steps -= 1
+                turn_no -= 1
+                continue
+            if message is None:
+                return ""
+            blocks = [block.to_dict() for block in message.content]
+            self.messages.append({"role": "assistant", "content": blocks})
+            usage = getattr(message, "usage", None)
+            if usage is not None:
+                run.emit(AgentEvent("usage", usage=usage.to_dict()))
 
-                calls = [b for b in blocks if b.get("type") == "tool_use"]
-                reason = message.stop_reason
-                if reason == "refusal":
-                    self._answer(calls, "Not run: the turn ended with a refusal.")
-                    details = getattr(message, "stop_details", None)
-                    category = getattr(details, "category", None) if details is not None else None
-                    raise AgentError("The model declined this request" + (f" ({category})." if category else "."), "refusal")
-                if reason == "max_tokens" and calls:
-                    self._answer(calls, "Not run: the reply hit max_tokens before this tool call was complete.")
-                    raise AgentError("The reply was cut off at the output limit. Ask for a smaller step.", "max_tokens")
-                if reason == "pause_turn":
-                    continue
-                if not calls:
-                    return _final_text(blocks)
+            calls = [b for b in blocks if b.get("type") == "tool_use"]
+            reason = message.stop_reason
+            if reason == "refusal":
+                self._answer(calls, "Not run: the turn ended with a refusal.")
+                details = getattr(message, "stop_details", None)
+                category = getattr(details, "category", None) if details is not None else None
+                raise AgentError("The model declined this request" + (f" ({category})." if category else "."), "refusal")
+            if reason == "max_tokens" and calls:
+                self._answer(calls, "Not run: the reply hit max_tokens before this tool call was complete.")
+                raise AgentError("The reply was cut off at the output limit. Ask for a smaller step.", "max_tokens")
+            if reason == "pause_turn":
+                continue
+            if not calls:
+                return _final_text(blocks)
 
-                results: list[dict[str, Any]] = []
-                for call in calls:
-                    result = ToolResult(CANCELLED, is_error=True) if run.cancelled else run.call_tool(call["id"], call["name"], call.get("input") or {})
-                    results.append(self._result_block(call["id"], result, vision))
-                image = run.feedback() if vision and not run.cancelled else None
-                if image is not None:
-                    results += [{"type": "text", "text": "Viewport after these changes:"}, image_block(image)]
-                self.messages.append({"role": "user", "content": results})
+            results: list[dict[str, Any]] = []
+            for call in calls:
+                result = ToolResult(CANCELLED, is_error=True) if run.cancelled else run.call_tool(call["id"], call["name"], call.get("input") or {})
+                results.append(self._result_block(call["id"], result, vision))
+            image = run.feedback() if vision and not run.cancelled else None
+            if image is not None:
+                results += [{"type": "text", "text": "Viewport after these changes:"}, image_block(image)]
+            self.messages.append({"role": "user", "content": results})
+        return ""
+
+    def _compact(self, run: Any, cfg: AgentConfig) -> str:
+        params = models.anthropic_params(models.anthropic_caps(cfg.model, cfg.model_info), "low", 8000)
+        request = [{"role": "user", "content": history.summary_prompt(self.messages, cfg.context_window)}]
+        try:
+            message = self._client.messages.create(model=cfg.model, system=history.SUMMARY_SYSTEM, messages=request, **params)
+        except Exception as exc:
+            run.emit(AgentEvent("info", text=history.compact_failed(str(map_error(exc, cfg.base_url)))))
             return ""
+        if getattr(message, "usage", None) is not None:
+            run.emit(AgentEvent("usage", usage=message.usage.to_dict()))
+        summary = _final_text([block.to_dict() for block in message.content])
+        if summary:
+            self.messages = []
+            run.emit(AgentEvent("info", text=history.COMPACTED))
+        return summary
+
+    def _close(self, note: str) -> None:
+        if self.messages and self.messages[-1]["role"] == "user":
+            self.messages.append({"role": "assistant", "content": [{"type": "text", "text": note}]})
 
     def _stream(self, params: dict[str, Any], run: Any, turn_no: int) -> Any:
         json_failures = 0

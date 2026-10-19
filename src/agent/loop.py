@@ -5,6 +5,7 @@ import itertools
 import json
 import sys
 import threading
+import time
 import traceback
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -195,7 +196,7 @@ class AgentSession:
         self._log_ids = 0
         self._entries: dict[int, LogEntry] = {}
 
-        self._agents: dict[Mode, Agent] = {}
+        self._agent: Agent | None = None
         self._endpoint: tuple[Any, ...] | None = None
         self._base_specs: list[ToolSpec] | None = None
         self._run: Run | None = None
@@ -240,7 +241,7 @@ class AgentSession:
 
     @property
     def has_history(self) -> bool:
-        return any(agent.has_history for agent in self._agents.values())
+        return self._agent is not None and self._agent.has_history
 
     @property
     def subagents_running(self) -> int:
@@ -265,13 +266,13 @@ class AgentSession:
         if self._endpoint != cfg.endpoint:
             if self.has_history:
                 self._log(LogKind.INFO, "The provider or API settings changed, so this is a new conversation.")
-            self._agents.clear()
+            self._agent = None
             self._endpoint = cfg.endpoint
             self._base_specs = None
-        agent = self._agents.get(self.mode)
+        agent = self._agent
         if agent is None:
             try:
-                agent = self._agents[self.mode] = self.agent_factory(cfg)
+                agent = self._agent = self.agent_factory(cfg)
             except Exception as exc:
                 traceback.print_exc(file=sys.stderr)
                 self._log(LogKind.ERROR, f"Couldn't start the agent: {exc}", status=Status.ERROR)
@@ -347,8 +348,8 @@ class AgentSession:
     def new_thread(self) -> None:
         if self.busy:
             self.stop()
-        for agent in self._agents.values():
-            agent.reset()
+        if self._agent is not None:
+            self._agent.reset()
         self._base_specs = None
         self._last_mode = None
         self._log(LogKind.INFO, "New conversation.")
@@ -390,12 +391,14 @@ class AgentSession:
                 self._settle_stream(run)
                 entry = self._stream_entries[(run.id, ev.key)] = self._log(LogKind.ASSISTANT, "", status=Status.RUNNING, agent=run.label)
             entry.text += ev.text
+            entry.updated = time.monotonic()
         elif ev.kind == "reasoning":
             entry = self._stream_entries.get((run.id, ev.key))
             if entry is None:
                 self._settle_stream(run)
                 entry = self._stream_entries[(run.id, ev.key)] = self._log(LogKind.REASONING, "Reasoning", status=Status.RUNNING, agent=run.label)
             entry.detail += ev.text
+            entry.updated = time.monotonic()
         elif ev.kind == "tool":
             self._settle_stream(run)
             if (run.id, ev.call_id) not in self._tool_entries:
@@ -448,7 +451,8 @@ class AgentSession:
         if entry is None or not self._active(run):
             return
         entry.status = Status.OK if done else Status.ERROR
-        entry.detail = entry.detail.replace(f"{total} in parallel", f"{done} of {total} finished", 1)
+        entry.result = f"{done} of {total} finished"
+        entry.updated = time.monotonic()
         self.host.changed()
 
     def _child_started(self, child: Run, task: str) -> str:
@@ -465,7 +469,8 @@ class AgentSession:
         if entry is None or not self._active(child):
             return
         entry.status = Status.ERROR if failed else (Status.CANCELLED if child.cancelled else Status.OK)
-        entry.detail = report.strip()
+        entry.result = report.strip()
+        entry.updated = time.monotonic()
         for (run_id, _call_id), tool_entry in self._tool_entries.items():
             if run_id == child.id and tool_entry.status in (Status.RUNNING, Status.WAITING):
                 tool_entry.status = Status.CANCELLED
@@ -602,16 +607,16 @@ class AgentSession:
         error: str | None = None,
     ) -> None:
         entry = self._tool_entry(run, call)
+        entry.updated = time.monotonic()
         if error is not None:
             entry.status = Status.ERROR
-            entry.detail = error
+            entry.result = error
             result = ToolResult(error, is_error=True)
         else:
             assert output is not None
             entry.status = Status.OK
             text = (output.text or "").strip()
-            if text and not text.startswith(("{", "[")):
-                entry.detail = text.splitlines()[0][:240]
+            entry.result = _result_summary(text)
             if spec is not None and spec.mutates:
                 run.mutated = True
             result = ToolResult(output.text or "ok", list(output.images))
@@ -632,7 +637,8 @@ class AgentSession:
 
     def _log(self, kind: LogKind, text: str, *, detail: str = "", status: Status = Status.OK, tool: str | None = None, agent: str = "") -> LogEntry:
         self._log_ids += 1
-        entry = LogEntry(self._log_ids, kind, text, detail, status, tool, agent=agent)
+        now = time.monotonic()
+        entry = LogEntry(self._log_ids, kind, text, detail, status, tool, agent=agent, started=now, updated=now)
         self.log.append(entry)
         self._entries[entry.id] = entry
         if len(self.log) > MAX_LOG:
@@ -649,6 +655,19 @@ class AgentSession:
             entry = self._tool_entries[(run.id, call.id)] = self._log(LogKind.TOOL, call.name, status=Status.RUNNING, tool=call.name, agent=run.label)
         call.log_id = entry.id
         return entry
+
+
+def _result_summary(text: str) -> str:
+    if not text.startswith(("{", "[")):
+        return text.splitlines()[0][:240] if text else "Done"
+    try:
+        value = json.loads(text)
+    except ValueError:
+        return "Done"
+    if isinstance(value, list):
+        return f"{len(value)} item{'s' * (len(value) != 1)}"
+    scalars = {k: v for k, v in value.items() if isinstance(v, str | int | float | bool)} if isinstance(value, dict) else {}
+    return _summarize(scalars, 120) if scalars else "Done"
 
 
 def _summarize(value: Any, limit: int = 160) -> str:

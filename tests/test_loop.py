@@ -192,7 +192,7 @@ def test_tool_then_feedback_then_text() -> None:
     kinds = [e.kind for e in session.log]
     assert kinds == [LogKind.USER, LogKind.ASSISTANT, LogKind.TOOL]
     assert session.log[1].text == "Making it. " and session.log[1].status is Status.OK
-    assert session.log[2].status is Status.OK and session.log[2].detail == "made cube"
+    assert session.log[2].status is Status.OK and session.log[2].result == "made cube"
 
 
 def test_no_screenshot_after_read_only_tools() -> None:
@@ -315,27 +315,27 @@ def test_tools_are_frozen_per_conversation_and_include_mcp() -> None:
     assert {"helper_tool", "meshy_text_to_3d"} <= third
 
 
-def test_each_tab_is_its_own_agent_with_its_own_conversation_and_tools() -> None:
+def test_tabs_share_one_conversation_with_their_own_prompt_and_tools() -> None:
     session, _host, bridge = session_with([[], [], []])
-    session.submit("one")
+    session.submit("build a chair")
     pump(bridge, lambda: not session.busy)
-    model_agent = agent()
-    session.set_mode(Mode.ANIMATE)
-    session.submit("two")
+    shared = agent()
+    session.set_mode(Mode.MATERIAL)
+    session.submit("make it oak")
     pump(bridge, lambda: not session.busy)
-    animator = agent()
-    assert animator is not model_agent and model_agent.history == ["one"] and animator.history == ["two"]
-    first, second = model_agent.runs[0], animator.runs[0]
-    assert "You are Model Builder" in first.system and "You are Animator" in second.system
+    assert agent() is shared and shared.history == ["build a chair", "make it oak"], "the next tab continues the same conversation"
+    first, second = shared.runs
+    assert "You are Model Builder" in first.system and "You are Material Generator" in second.system
     first_tools = {s.name for s in first.tools}
     second_tools = {s.name for s in second.tools}
-    assert "keyframe" not in first_tools and "keyframe" in second_tools
-    assert {"run_python", "spawn_agents"} <= first_tools and {"run_python", "spawn_agents"} <= second_tools
-    assert any("Animator" in e.text for e in session.log if e.kind is LogKind.INFO)
+    assert "keyframe" not in first_tools and {"run_python", "spawn_agents"} <= first_tools and {"run_python", "spawn_agents"} <= second_tools
+    assert any("Material Generator" in e.text for e in session.log if e.kind is LogKind.INFO)
     session.set_mode(Mode.MODEL)
-    session.submit("three")
+    session.submit("taller legs")
     pump(bridge, lambda: not session.busy)
-    assert model_agent.history == ["one", "three"], "back on the tab, the Model Builder remembers"
+    assert agent() is shared and shared.history == ["build a chair", "make it oak", "taller legs"]
+    session.new_thread()
+    assert not session.has_history
 
 
 def test_tools_of_another_agent_are_explained() -> None:
@@ -405,12 +405,12 @@ def test_spawned_subagents_run_in_parallel_and_report_back() -> None:
     assert "## model_builder · House\nbuilt house" in report.text and "built well" in report.text
     children = [e for e in session.log if e.kind is LogKind.AGENT]
     assert sorted(e.text for e in children) == ["Model Builder · House", "Model Builder · Well"]
-    assert all(e.status is Status.OK and e.detail.startswith("built") for e in children)
+    assert all(e.status is Status.OK and e.result.startswith("built") for e in children)
     tool_rows = [e for e in session.log if e.kind is LogKind.TOOL and e.tool == "make"]
     assert sorted(e.agent for e in tool_rows) == ["Model Builder · House", "Model Builder · Well"]
     assert all(e.status is Status.OK for e in tool_rows)
     spawn_row = next(e for e in session.log if e.tool == roles.SPAWN_TOOL)
-    assert spawn_row.status is Status.OK and spawn_row.detail == "2 of 2 finished: House, Well"
+    assert spawn_row.status is Status.OK and spawn_row.detail == "2 in parallel: House, Well" and spawn_row.result == "2 of 2 finished"
 
 
 def test_subagents_nest_up_to_the_depth_limit() -> None:
@@ -485,3 +485,12 @@ def test_changing_the_endpoint_starts_a_new_agent() -> None:
     pump(bridge, lambda: not session.busy)
     assert len(created) == 2 and created[1].cfg.provider == "ANTHROPIC"
     assert any("new conversation" in e.text for e in session.log)
+
+
+def test_tool_results_are_summarised_for_the_transcript() -> None:
+    from blender_ai.agent.loop import _result_summary
+
+    assert _result_summary('{"name": "Crate", "type": "MESH", "dimensions": [1, 1, 1]}') == "name=Crate  type=MESH"
+    assert _result_summary("[1, 2, 3]") == "3 items"
+    assert _result_summary("Created Crate\nmore") == "Created Crate"
+    assert _result_summary("") == "Done" and _result_summary("{not json") == "Done"

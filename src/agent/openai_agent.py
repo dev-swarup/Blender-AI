@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from .. import deps, models
 from ..providers import OPENAI_URL
 from ..tools.registry import ImagePart, ToolKind, ToolSpec
+from . import history
 from .config import AgentConfig
 from .messages import AgentError, AgentEvent, UserTurn
 
@@ -138,7 +139,6 @@ class OpenAIAgent:
         self.cfg = cfg
         self.history: list[Any] = []
         self.no_images: set[str] = set()
-        self.no_reasoning: set[str] = set()
         self.no_usage: set[str] = set()
         self._lock = threading.Lock()
 
@@ -153,15 +153,27 @@ class OpenAIAgent:
     def run(self, run: Any, turn: UserTurn) -> str:
         with self._lock:
             self.cfg = run.config
-            return asyncio.run(self._run(run, turn))
+            note = history.FAILED
+            try:
+                reply = asyncio.run(self._run(run, turn))
+                note = history.STOPPED
+                return reply
+            except AgentError as exc:
+                note = history.PAUSED if exc.kind == "paused" else history.FAILED
+                raise
+            finally:
+                self._close(history.STOPPED if run.cancelled else note)
 
     async def _run(self, run: Any, turn: UserTurn) -> str:
         cfg: AgentConfig = run.config
+        lead = ""
+        if history.needs_compaction(self.history, cfg.context_window) and (summary := await self._compact(run, cfg)):
+            lead = history.summary_turn(summary)
         for _attempt in range(4):
             state = _RunState(images_ok=cfg.vision and cfg.model not in self.no_images)
             before = list(self.history)
             try:
-                return await self._attempt(run, turn, state)
+                return await self._attempt(run, turn, state, lead)
             except AgentError:
                 raise
             except Exception as exc:
@@ -175,9 +187,8 @@ class OpenAIAgent:
                             "This model doesn't accept images, so screenshots are now off for it. Send your message again to continue.", "vision"
                         ) from exc
                     run.emit(AgentEvent("info", text="This model doesn't accept images; continuing without them."))
-                elif retry and "reasoning" in text and cfg.model not in self.no_reasoning:
-                    self.no_reasoning.add(cfg.model)
-                    run.emit(AgentEvent("info", text="This model has no reasoning levels; using Auto."))
+                elif retry and ("reasoning" in text or "effort" in text) and (effort := cfg.effort()) != "auto":
+                    run.emit(AgentEvent("info", text=cfg.reject_effort(effort)))
                 elif retry and "stream_options" in text and cfg.model not in self.no_usage:
                     self.no_usage.add(cfg.model)
                 else:
@@ -185,7 +196,30 @@ class OpenAIAgent:
                 self.history = before
         raise AgentError("The request kept failing; check the model and API URL.", "api")
 
-    async def _attempt(self, run: Any, turn: UserTurn, state: _RunState) -> str:
+    async def _compact(self, run: Any, cfg: AgentConfig) -> str:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(base_url=api_root(cfg.base_url), api_key=cfg.api_key or "not-needed", max_retries=2, timeout=600.0)
+        request = [{"role": "system", "content": history.SUMMARY_SYSTEM}, {"role": "user", "content": history.summary_prompt(self.history, cfg.context_window)}]
+        try:
+            reply = await client.chat.completions.create(model=cfg.model, messages=request)
+        except Exception as exc:
+            run.emit(AgentEvent("info", text=history.compact_failed(str(map_error(exc, api_root(cfg.base_url))))))
+            return ""
+        if reply.usage is not None:
+            run.emit(AgentEvent("usage", usage={"input_tokens": reply.usage.prompt_tokens, "output_tokens": reply.usage.completion_tokens}))
+        summary = (reply.choices[0].message.content or "").strip() if reply.choices else ""
+        if summary:
+            self.history = []
+            run.emit(AgentEvent("info", text=history.COMPACTED))
+        return summary
+
+    def _close(self, note: str) -> None:
+        last = self.history[-1] if self.history else None
+        if isinstance(last, dict) and not (last.get("role") == "assistant" and last.get("type", "message") == "message"):
+            self.history.append({"role": "assistant", "content": note})
+
+    async def _attempt(self, run: Any, turn: UserTurn, state: _RunState, lead: str = "") -> str:
         from agents import Agent, FunctionTool, ModelSettings, OpenAIChatCompletionsModel, RunConfig, Runner
         from agents.exceptions import MaxTurnsExceeded
         from agents.run_config import ModelInputData
@@ -196,8 +230,9 @@ class OpenAIAgent:
         root = api_root(cfg.base_url)
         client = AsyncOpenAI(base_url=root, api_key=cfg.api_key or "not-needed", max_retries=2, timeout=600.0)
         settings = ModelSettings(include_usage=cfg.model not in self.no_usage or None)
-        if cfg.reasoning in models.REASONING_LEVELS[1:] and cfg.model not in self.no_reasoning:
-            settings = ModelSettings(include_usage=settings.include_usage, reasoning=Reasoning(effort=cfg.reasoning))
+        effort = cfg.effort()
+        if effort != "auto":
+            settings = ModelSettings(include_usage=settings.include_usage, reasoning=Reasoning(effort=effort))
 
         tools = [self._tool(spec, run, state, FunctionTool) for spec in run.tools]
         agent = Agent(
@@ -207,7 +242,7 @@ class OpenAIAgent:
             model=OpenAIChatCompletionsModel(model=cfg.model, openai_client=client),
             model_settings=settings,
         )
-        content: list[dict[str, Any]] = []
+        content: list[dict[str, Any]] = [{"type": "input_text", "text": lead}] if lead else []
         if turn.snapshot:
             content.append({"type": "input_text", "text": f"<scene>\n{turn.snapshot}\n</scene>"})
         if turn.attachment is not None and state.images_ok:

@@ -182,9 +182,16 @@ class BlenderAIPreferences(AddonPreferences):
             return self.image_url.strip(), self.image_key.strip() or (self.api_key() if not self.is_anthropic else "")
         return None if self.is_anthropic else (self.api_url(), self.api_key())
 
-    def agent_config(self) -> AgentConfig:
+    def model_info(self) -> models.ModelInfo | None:
         listed = state.get().chat_models
-        info = models.find(listed.models, self.model()) if listed.endpoint == self.chat_endpoint() else None
+        return models.find(listed.models, self.model()) if listed.endpoint == self.chat_endpoint() else None
+
+    def reasoning_levels(self) -> tuple[str, ...]:
+        model = self.model()
+        return models.offered_efforts(self.provider, model, self.model_info(), models.effort_key(self.api_url(), model))
+
+    def agent_config(self) -> AgentConfig:
+        info = self.model_info()
         return AgentConfig(
             provider=self.provider,
             base_url=self.api_url(),
@@ -326,9 +333,11 @@ def draw_model_rows(layout: Any, prefs: BlenderAIPreferences) -> None:
     label = models.short_label(prefs.model(), st.chat_models.models) or "Choose…"
     row.operator("blender_ai.choose_model", text=label, icon="DOWNARROW_HLT")
     row.operator("blender_ai.refresh_models", text="", icon="FILE_REFRESH")
-    row = layout.row(align=True)
-    row.label(text="Reasoning")
-    row.prop(prefs, "reasoning", text="")
+    levels = prefs.reasoning_levels()
+    if levels:
+        row = layout.row(align=True)
+        row.label(text="Reasoning")
+        row.menu("BLENDER_AI_MT_reasoning", text=models.LEVEL_LABELS[models.effective_effort(prefs.reasoning, levels)])
     row = layout.row(align=True)
     row.label(text="Image model")
     if prefs.image_endpoint() is None:

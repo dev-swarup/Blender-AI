@@ -8,8 +8,71 @@ from typing import Any, Literal
 OPENAI = "OPENAI"
 ANTHROPIC = "ANTHROPIC"
 
-REASONING_LEVELS = ("auto", "low", "medium", "high")
-LEVEL_LABELS = {"auto": "Auto", "low": "Low", "medium": "Medium", "high": "High"}
+REASONING_LEVELS = ("auto", "none", "minimal", "low", "medium", "high", "xhigh", "max")
+EFFORT_ORDER = REASONING_LEVELS[1:]
+LEVEL_LABELS = {"auto": "Auto", "none": "Off", "minimal": "Minimal", "low": "Low", "medium": "Medium", "high": "High", "xhigh": "Extra high", "max": "Max"}
+LEVEL_HINTS = {
+    "auto": "model default",
+    "none": "no thinking",
+    "minimal": "fastest",
+    "low": "quick",
+    "medium": "balanced",
+    "high": "careful",
+    "xhigh": "deeper, slower",
+    "max": "deepest, slowest",
+}
+
+
+def listed_efforts(values: Any) -> tuple[str, ...]:
+    found = {str(v).lower() for v in values} if isinstance(values, list | tuple) else set()
+    return tuple(e for e in EFFORT_ORDER if e in found)
+
+
+def effective_effort(level: str, listed: tuple[str, ...]) -> str:
+    if level not in EFFORT_ORDER or not listed:
+        return "auto"
+    if level in listed:
+        return level
+    usable = [e for e in listed if e != "none"]
+    lower = [e for e in usable if EFFORT_ORDER.index(e) < EFFORT_ORDER.index(level)]
+    return lower[-1] if lower else (usable[0] if usable else "auto")
+
+
+STANDARD_EFFORTS = ("low", "medium", "high")
+EDGE_EFFORTS = frozenset({"none", "minimal", "xhigh", "max"})
+REASONING_PARAMS = frozenset({"reasoning", "reasoning_effort", "include_reasoning"})
+_EFFORT_FAMILIES = (
+    (re.compile(r"gpt-[34]|chat-latest|gpt-image|dall-?e", re.IGNORECASE), ()),
+    (re.compile(r"gpt-5\.\d", re.IGNORECASE), ("none", "low", "medium", "high", "xhigh")),
+    (re.compile(r"gpt-5", re.IGNORECASE), ("minimal", "low", "medium", "high")),
+)
+_rejected: dict[str, set[str]] = {}
+
+
+def effort_key(base_url: str, model_id: str) -> str:
+    return f"{base_url.strip().rstrip('/')}#{model_id}"
+
+
+def reject_effort(key: str, level: str) -> None:
+    _rejected.setdefault(key, set()).add(level if level in EDGE_EFFORTS else "*")
+
+
+def forget_rejections() -> None:
+    _rejected.clear()
+
+
+def _family_efforts(provider: str, model_id: str, info: ModelInfo | None) -> tuple[str, ...]:
+    if provider == ANTHROPIC:
+        return EFFORTS if anthropic_caps(model_id, info).thinking != "none" else ()
+    return next((levels for pattern, levels in _EFFORT_FAMILIES if pattern.search(model_id)), STANDARD_EFFORTS)
+
+
+def offered_efforts(provider: str, model_id: str, info: ModelInfo | None, key: str = "") -> tuple[str, ...]:
+    rejected = _rejected.get(key, set())
+    if "*" in rejected or (info is not None and info.reasoning is False):
+        return ()
+    levels = info.efforts if info is not None and info.efforts else _family_efforts(provider, model_id, info)
+    return tuple(e for e in levels if e not in rejected)
 
 
 _IMAGE_ID = re.compile(
@@ -56,6 +119,10 @@ class ModelInfo:
     capabilities: Mapping[str, Any] | None = None
     max_output: int | None = None
     free: bool | None = None
+    efforts: tuple[str, ...] = ()
+    default_effort: str = ""
+    reasoning: bool | None = None
+    context: int | None = None
 
     @property
     def label(self) -> str:
@@ -124,16 +191,38 @@ def parse_model(entry: Any) -> ModelInfo | None:
         if isinstance(caps.get("function_calling"), bool):
             tools = caps["function_calling"]
     supported = entry.get("supported_parameters")
+    thinks: bool | None = None
     if isinstance(supported, list) and supported:
         tools = "tools" in supported
+        thinks = bool(REASONING_PARAMS.intersection(supported))
 
     name = entry.get("display_name") or entry.get("name") or ""
     name = name if isinstance(name, str) and name != model_id else ""
+    top = entry.get("top_provider") if isinstance(entry.get("top_provider"), Mapping) else {}
     max_out = entry.get("max_tokens") or entry.get("max_output_tokens")
+    context = entry.get("context_length") or entry.get("max_input_tokens") or entry.get("context_window") or top.get("context_length")
     if not isinstance(max_out, int):
-        top = entry.get("top_provider") if isinstance(entry.get("top_provider"), Mapping) else {}
         max_out = top.get("max_completion_tokens")
-    return ModelInfo(model_id, name, inputs, outputs, tools, caps, max_out if isinstance(max_out, int) and max_out > 0 else None, _free(entry.get("pricing")))
+    reasoning = entry.get("reasoning") if isinstance(entry.get("reasoning"), Mapping) else {}
+    efforts = listed_efforts(reasoning.get("supported_efforts"))
+    effort_caps = caps.get("effort") if caps is not None and isinstance(caps.get("effort"), Mapping) else {}
+    if not efforts and effort_caps.get("supported"):
+        efforts = tuple(e for e in EFFORT_ORDER if isinstance(effort_caps.get(e), Mapping) and effort_caps[e].get("supported"))
+    default = str(reasoning.get("default_effort") or "").lower()
+    return ModelInfo(
+        model_id,
+        name,
+        inputs,
+        outputs,
+        tools,
+        caps,
+        max_out if isinstance(max_out, int) and max_out > 0 else None,
+        _free(entry.get("pricing")),
+        efforts,
+        default if default in EFFORT_ORDER else "",
+        True if reasoning or efforts else thinks,
+        context if isinstance(context, int) and context > 0 else None,
+    )
 
 
 def parse_models(payload: Any) -> list[ModelInfo]:
@@ -197,10 +286,11 @@ def short_label(model_id: str, listed: list[ModelInfo] | None = None) -> str:
 
 ThinkingStyle = Literal["always", "adaptive", "explicit", "budget", "none"]
 
-EFFORTS = ("low", "medium", "high")
-_BUDGETS = {"low": 2048, "medium": 8000, "high": 16000}
-_MIN_MAX_TOKENS = {"low": 8000, "medium": 16000, "high": 32000}
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_BUDGETS = {"low": 2048, "medium": 8000, "high": 16000, "xhigh": 24000, "max": 32000}
+_MIN_MAX_TOKENS = {"low": 8000, "medium": 16000, "high": 32000, "xhigh": 48000, "max": 64000}
 DEFAULT_MAX_TOKENS = 32000
+DEFAULT_CONTEXT = {ANTHROPIC: 200_000, OPENAI: 128_000}
 
 
 @dataclass(frozen=True)

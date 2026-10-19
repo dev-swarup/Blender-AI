@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-20
+
+### Added
+
+- A chat transcript inside the prompt bar, styled after Claude Code: your messages, the agents' replies,
+  thinking, and each tool call with its result. It scrolls, lines expand on click, and token usage shows
+  on top.
+- Automatic compaction: long conversations are summarized when they near the model's context window.
+
+### Changed
+
+- The tabs share one conversation, so follow-ups keep their context across tabs.
+- **Generate** is now **Submit**, sized like the ⚙ button, and the bar stays short so the model stays
+  in view.
+- Reasoning levels follow the model: from `/models` when listed, otherwise by model family, otherwise
+  Low, Medium and High. Levels the API rejects are dropped for that model.
+- The agents reply more concisely.
+
 ## [0.3.0] - 2026-10-19
 
 ### Added
@@ -112,4 +130,5 @@ All notable changes to this project are documented in this file. The format foll
 - Packaging as per-platform zips for Windows, macOS (Apple silicon and Intel) and Linux, for Blender 4.2
   LTS and later.
 
+[0.4.0]: https://github.com/dev-swarup/Blender-AI/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dev-swarup/Blender-AI/releases/tag/v0.3.0

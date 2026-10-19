@@ -6,8 +6,9 @@ import zlib
 import numpy as np
 import pytest
 
+from blender_ai.agent.messages import LogEntry, LogKind, Status, Usage
 from blender_ai.imaging.png import downscale, encode_png, png_size
-from blender_ai.ui import dropdown, layout
+from blender_ai.ui import dropdown, layout, transcript
 from blender_ai.ui.textedit import Span, TextBuffer, caret_line, wrap
 
 
@@ -68,7 +69,7 @@ TABS = [("MODEL", 110.0, 30.0), ("SCENE", 90.0, 30.0), ("ANIMATE", 120.0, 30.0),
 @pytest.mark.parametrize(("w", "h"), [(800, 600), (1920, 1080), (520, 500)])
 def test_bar_centered_and_inside(scale: float, w: int, h: int) -> None:
     m = layout.Metrics.from_scale(scale)
-    bar = layout.compute(w, h, m, left_inset=40, right_inset=200, log_rows=3, tab_widths=TABS, active_tab="MODEL")
+    bar = layout.compute(w, h, m, left_inset=40, right_inset=200, log_height=60, log_header=True, tab_widths=TABS, active_tab="MODEL")
     if bar is None:
         assert w - 240 - 2 * m.unit < 14 * m.unit or h < 8 * m.unit
         return
@@ -79,15 +80,18 @@ def test_bar_centered_and_inside(scale: float, w: int, h: int) -> None:
     for rect in (bar.model_pill, bar.reasoning_pill, bar.image_pill, bar.field, bar.attach, bar.gear, bar.send):
         if rect is not None:
             assert card.contains(rect.x, rect.y) and card.contains(rect.right, rect.top)
-    assert bar.field.right <= bar.send.x and bar.gear.right <= bar.send.x
-    assert bar.send.h > bar.gear.h * 2, "Generate spans the card's height"
+    assert bar.gear.right <= bar.send.x and bar.send.right <= bar.field.right
+    assert bar.send.h == bar.gear.h and bar.send.y == bar.gear.y, "Submit sits in the control row, as tall as the gear"
+    assert bar.field.y >= bar.send.top, "the text field spans the card above the controls"
     pills = [r for r in (bar.model_pill, bar.reasoning_pill, bar.image_pill) if r is not None]
     for left, right in zip([bar.attach, *pills], [*pills, bar.gear], strict=True):
         assert left.right <= right.x, "pills don't overlap"
-    assert bar.tab_bar is not None and bar.tab_bar.y >= card.top
+    assert bar.tab_bar is not None and bar.tab_bar.y >= card.top and bar.tab_bar.top <= h
     assert abs(bar.tab_bar.cx - card.cx) <= 1 and bar.tab_bar.w <= card.w
     if bar.log_panel is not None:
-        assert bar.log_panel.y >= bar.tab_bar.top and bar.log_panel.top <= h
+        assert card.contains(bar.log_panel.x, bar.log_panel.y) and card.contains(bar.log_panel.right, bar.log_panel.top), "the transcript is inside the bar"
+        assert bar.log_panel.y >= bar.field.top, "the transcript sits above the text field"
+        assert bar.log_view is not None and bar.log_header is not None and bar.log_view.top <= bar.log_header.y
 
 
 def test_narrow_bar_drops_pills_image_first_and_tab_labels() -> None:
@@ -103,15 +107,18 @@ def test_narrow_bar_drops_pills_image_first_and_tab_labels() -> None:
 def test_layout_shrinks_log_and_hides_when_tiny() -> None:
     m = layout.Metrics.from_scale(1.0)
     assert layout.compute(150, 400, m) is None
-    short = layout.compute(900, 260, m, log_rows=6)
-    assert short is not None and len(short.log_rows) < 6
-    tall = layout.compute(900, 900, m, log_rows=6, approval=True)
-    assert tall is not None and len(tall.log_rows) == 6 and tall.approve is not None
+    short = layout.compute(900, 260, m, log_height=400, log_header=True, tab_widths=TABS, active_tab="MODEL")
+    assert short is not None and short.log_view is not None and short.log_view.h < 400 and short.tab_bar.top <= 260
+    tall = layout.compute(900, 900, m, log_height=200, log_header=True, approval=True)
+    assert tall is not None and tall.log_view.h == 200 and tall.approve is not None
+    assert tall.log_view.y >= tall.approve.top >= tall.approve.y >= tall.field.top, "Run / Deny sit between the transcript and the text field"
+    empty = layout.compute(900, 900, m)
+    assert empty.log_panel is None and tall.card.y == empty.card.y and tall.card.h > empty.card.h, "the bar grows upwards with the transcript"
 
 
 def test_hit_testing() -> None:
     m = layout.Metrics.from_scale(1.0)
-    bar = layout.compute(1000, 800, m, pill_widths=(90, 110, 90), log_rows=2, tab_widths=TABS, active_tab="MODEL")
+    bar = layout.compute(1000, 800, m, pill_widths=(90, 110, 90), log_height=80, log_header=True, tab_widths=TABS, active_tab="MODEL")
     assert bar is not None
     assert bar.hit(bar.send.cx, bar.send.cy) == "send"
     assert bar.hit(bar.model_pill.cx, bar.model_pill.cy) == "model"
@@ -122,9 +129,12 @@ def test_hit_testing() -> None:
     tab = bar.tabs[2]
     assert bar.hit(tab.rect.cx, tab.rect.cy) == "tab:ANIMATE"
     assert bar.hit(5, 5) is None
-    bar.log_rows = [(rect, 42) for rect, _ in bar.log_rows]
-    rect = bar.log_rows[0][0]
-    assert bar.hit(rect.cx, rect.cy) == "log:42"
+    view = bar.log_view
+    bar.log_rows = [(layout.Rect(view.x, view.y, view.w, 20), 42)]
+    assert bar.hit(view.cx, view.y + 10) == "log:42"
+    bar.log_latest = layout.Rect(view.right - 60, view.y, 60, 20)
+    assert bar.hit(view.right - 30, view.y + 10) == "log_latest"
+    assert bar.hit(view.cx, view.top - 5) == "log"
 
 
 def test_text_area_grows_upwards() -> None:
@@ -215,3 +225,84 @@ def test_dropdown_scroll_is_clamped() -> None:
     assert dd.scroll == len(dd.visible()) - 5
     dd.scroll_by(-50, 5)
     assert dd.scroll == 0
+
+
+def entry(i: int, kind: LogKind, text: str, **kw: object) -> LogEntry:
+    return LogEntry(i, kind, text, **kw)
+
+
+def test_transcript_reads_like_a_chat() -> None:
+    log = [
+        entry(1, LogKind.USER, "make a red cube and a ball"),
+        entry(2, LogKind.REASONING, "Reasoning", detail="plan the cube", started=10.0, updated=14.2),
+        entry(3, LogKind.ASSISTANT, "I'll add both now."),
+        entry(4, LogKind.TOOL, "create_primitive", detail="kind=cube  name=Crate", result="Created Crate", tool="create_primitive"),
+        entry(5, LogKind.TOOL, "run_python", detail="code=...", result="NameError: x", status=Status.ERROR, tool="run_python"),
+        entry(6, LogKind.TOOL, "frame_view", status=Status.RUNNING, tool="frame_view"),
+        entry(7, LogKind.ASSISTANT, "Done: a red cube named Crate."),
+    ]
+    lines = transcript.build(log, len, 60, 4)
+    text = [(line.marker, line.text, line.suffix) for line in lines if line.height >= 1]
+    assert text[0] == ("user", "make a red cube and a ball", "")
+    assert lines[0].band and lines[0].tone == "user"
+    assert ("thought", "Thought for 4s", "") in text
+    assert ("dot", "I'll add both now.", "") in text
+    assert ("dot", "create_primitive", "kind=cube  name=Crate") in text
+    assert ("tree", "Created Crate", "") in text
+    assert any(line.marker == "tree" and line.tone == "error" and line.text == "NameError: x" for line in lines)
+    assert ("spin", "frame_view", "") in text, "a running tool spins and has no result line yet"
+    assert sum(1 for line in lines if line.height < 1) == len(log) - 1, "a small gap between blocks"
+
+
+def test_transcript_wraps_and_expands() -> None:
+    long = "word " * 30
+    lines = transcript.build([entry(1, LogKind.ASSISTANT, long)], len, 40, 4)
+    assert len(lines) > 3 and lines[0].marker == "dot" and all(line.marker == "" for line in lines[1:])
+    assert all(len(line.text) <= 40 for line in lines)
+    tool = entry(2, LogKind.TOOL, "run_python", detail="code=line1\nline2", result="ok", expanded=True)
+    expanded = [line.text for line in transcript.build([tool], len, 40, 4)]
+    assert "line2" in expanded and "ok" in expanded
+    thinking = entry(3, LogKind.REASONING, "Reasoning", detail="first idea", status=Status.RUNNING)
+    assert [line.text for line in transcript.build([thinking], len, 40, 4)] == ["Thinking…"]
+
+
+def test_transcript_folds_sub_agents() -> None:
+    log = [
+        entry(1, LogKind.USER, "build a village"),
+        entry(2, LogKind.AGENT, "Model Builder · House", detail="Build a house", status=Status.RUNNING),
+        entry(3, LogKind.TOOL, "create_primitive", detail="kind=cube", result="ok", agent="Model Builder · House"),
+        entry(4, LogKind.TOOL, "add_modifier", detail="type=BEVEL", status=Status.RUNNING, agent="Model Builder · House"),
+    ]
+    lines = transcript.build(log, len, 80, 4)
+    assert [line.text for line in lines if line.height >= 1] == ["build a village", "Model Builder · House", "add_modifier"]
+    assert lines[-1].suffix == "2 steps" and lines[-1].marker == "tree"
+    log[1].status, log[1].result, log[1].expanded = Status.OK, "Built House in collection House", True
+    lines = transcript.build(log, len, 80, 4)
+    assert [line.text for line in lines if line.height >= 1][2] == "Built House in collection House"
+    assert any(line.text == "create_primitive" and line.indent == 1 for line in lines), "expanding shows the steps"
+
+
+def test_scroll_follows_until_the_user_scrolls_up() -> None:
+    s = transcript.Scroll()
+    s.sync(100, 200)
+    assert s.offset == 0 and s.following
+    s.sync(500, 200)
+    assert s.offset == 0, "new lines keep the view on the latest"
+    s.scroll(120, 200)
+    assert s.offset == 120 and not s.following
+    s.sync(560, 200)
+    assert s.offset == 180, "the same lines stay in view while new ones arrive"
+    s.scroll(10_000, 200)
+    assert s.offset == 360
+    s.sync(250, 200)
+    assert s.offset == 50, "clamped when the content shrinks"
+    s.to_latest()
+    assert s.following
+
+
+def test_token_labels() -> None:
+    assert transcript.fmt_tokens(950) == "950" and transcript.fmt_tokens(12_400) == "12.4k" and transcript.fmt_tokens(2_500_000) == "2.5M"
+    usage = Usage()
+    assert transcript.usage_parts(usage) == []
+    usage.add({"input_tokens": 250_400, "output_tokens": 17_500, "cached_tokens": 177_800})
+    assert transcript.usage_parts(usage) == ["250.4k in", "17.5k out", "177.8k cached"]

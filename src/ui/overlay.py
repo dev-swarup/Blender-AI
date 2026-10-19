@@ -9,23 +9,17 @@ import gpu
 
 from .. import models, state
 from ..agent import roles
-from ..agent.messages import LogEntry, LogKind, Phase, Status
-from . import draw, icons, layout, theme
+from ..agent.messages import Phase
+from . import draw, icons, layout, theme, transcript
 from . import dropdown as dropdown_mod
 from .layout import BarLayout, Rect
 from .textedit import Span, caret_line, wrap
+from .transcript import Line
 
-COLLAPSED_ROWS = 4
-
-
-@dataclass
-class Row:
-    entry_id: int
-    text: str
-    color: theme.RGBA
-    dot: theme.RGBA | None = None
-    spinning: bool = False
-    suffix: str = ""
+LOG_IDLE_ROWS = 3
+LOG_ACTIVE_ROWS = 6
+LOG_EXPANDED_ROWS = 26
+LOG_EXPANDED_SHARE = 0.45
 
 
 def _prefs() -> Any:
@@ -34,85 +28,31 @@ def _prefs() -> Any:
     return get_prefs()
 
 
-def _status_color(entry: LogEntry, pal: theme.Palette) -> theme.RGBA:
-    return {Status.RUNNING: pal.accent, Status.WAITING: pal.warning, Status.ERROR: pal.error, Status.CANCELLED: pal.text_dim}.get(
-        entry.status, theme.mix(pal.log_text, pal.accent, 0.5)
-    )
+def _row_h(m: layout.Metrics) -> float:
+    return round(m.small_px * 1.6)
 
 
-def _wrapped(text: str, size: float, width: float, limit: int) -> list[str]:
-    spans = wrap(text, width, lambda s: draw.text_width(s, size))
-    lines = [text[s.start : s.end] for s in spans if text[s.start : s.end].strip()]
-    if len(lines) > limit:
-        lines = [*lines[: limit - 1], draw.ellipsize(" ".join(lines[limit - 1 :]), size, width)]
-    return lines
+def scroll_step() -> float:
+    return _row_h(theme.metrics()) * 3
 
 
-def _who(entry: LogEntry) -> str:
-    return entry.agent.split(" · ", 1)[-1] + " › " if entry.agent else ""
+def _marker_w(m: layout.Metrics) -> float:
+    return _row_h(m)
 
 
-def log_rows(entries: list[LogEntry], pal: theme.Palette, size: float, width: float, limit: int) -> list[Row]:
-    rows: list[Row] = []
-    last_assistant = next((e.id for e in reversed(entries) if e.kind is LogKind.ASSISTANT and not e.agent), None)
-    for e in entries[-(limit * 3) :]:
-        first = (e.text or "").strip().splitlines()[0] if (e.text or "").strip() else ""
-        who = _who(e)
-        if e.kind is LogKind.USER:
-            rows.append(Row(e.id, "› " + first, pal.text_dim))
-        elif e.kind is LogKind.ASSISTANT:
-            if not e.text.strip():
-                continue
-            expanded = e.expanded or e.id == last_assistant
-            lines = _wrapped(e.text.strip(), size, width, 4) if expanded else [who + first]
-            rows.extend(Row(e.id, line, pal.log_text if not who else pal.text_dim) for line in lines)
-        elif e.kind is LogKind.REASONING:
-            arrow = "▾" if e.expanded else "▸"
-            rows.append(Row(e.id, f"{arrow} {who}Reasoning", pal.text_dim, spinning=e.status is Status.RUNNING))
-            if e.expanded and e.detail.strip():
-                rows.extend(Row(e.id, line, pal.text_dim) for line in _wrapped(e.detail.strip(), size, width - size, 8))
-        elif e.kind is LogKind.TOOL:
-            mark = "! " if e.destructive else ""
-            rows.append(
-                Row(
-                    e.id,
-                    who + mark + e.text,
-                    pal.warning if e.destructive and e.status is Status.OK else pal.log_text,
-                    dot=_status_color(e, pal),
-                    spinning=e.status is Status.RUNNING,
-                    suffix=e.detail.replace("\n", " ") if not e.expanded else "",
-                )
-            )
-            if e.expanded and e.detail:
-                rows.extend(Row(e.id, line, pal.text_dim) for line in _wrapped(e.detail, size, width - size, 8))
-        elif e.kind is LogKind.ERROR:
-            rows.extend(Row(e.id, line, pal.error) for line in _wrapped(e.text, size, width, 3))
-        elif e.kind is LogKind.AGENT:
-            done = e.status is not Status.RUNNING
-            rows.append(
-                Row(
-                    e.id,
-                    who + ("Sub-agent " if not done else "") + e.text,
-                    pal.log_text,
-                    dot=_status_color(e, pal),
-                    spinning=not done,
-                    suffix=(e.detail.strip().splitlines() or [""])[0] if not e.expanded else "",
-                )
-            )
-            if e.expanded and e.detail:
-                rows.extend(Row(e.id, line, pal.text_dim) for line in _wrapped(e.detail, size, width - size, 10))
-        elif e.kind is LogKind.APPROVAL:
-            rows.append(Row(e.id, who + "Run this Python? Click to read the code.", pal.warning, dot=pal.warning))
-            if e.expanded:
-                rows.extend(Row(e.id, line, pal.log_text) for line in e.detail.splitlines()[:10])
-        elif e.kind is LogKind.QUESTION:
-            color = pal.accent_text if e.status is Status.WAITING else pal.log_text
-            rows.append(Row(e.id, "? " + first, color, dot=pal.accent))
-            if e.detail:
-                rows.append(Row(e.id, e.detail, pal.text_dim))
-        else:
-            rows.append(Row(e.id, first, pal.text_dim))
-    return rows[-limit:]
+def _tone(tone: str, pal: theme.Palette) -> theme.RGBA:
+    done = theme.mix(pal.card_text, pal.accent, 0.5)
+    return {
+        "text": pal.card_text,
+        "user": pal.card_text,
+        "dim": pal.card_text_dim,
+        "error": pal.error,
+        "warning": pal.warning,
+        "accent": pal.accent,
+        "running": pal.accent,
+        "ok": done,
+        "cancelled": pal.card_text_dim,
+    }.get(tone, pal.card_text)
 
 
 def _insets(area: bpy.types.Area) -> tuple[float, float]:
@@ -132,7 +72,7 @@ def _insets(area: bpy.types.Area) -> tuple[float, float]:
 @dataclass
 class Labels:
     model: str
-    reasoning: str
+    reasoning: str | None
     image: str | None
     send: str
 
@@ -148,8 +88,10 @@ def _labels(prefs: Any, session: Any) -> Labels:
     elif session is not None and session.busy:
         send = "Stop"
     else:
-        send = "Generate"
-    return Labels(model, "Reasoning: " + models.LEVEL_LABELS.get(prefs.reasoning, "Auto"), image, send)
+        send = "Submit"
+    levels = prefs.reasoning_levels()
+    reasoning = "Reasoning: " + models.LEVEL_LABELS[models.effective_effort(prefs.reasoning, levels)] if levels else None
+    return Labels(model, reasoning, image, send)
 
 
 def _pill_w(label: str, m: layout.Metrics, icon: bool) -> float:
@@ -194,13 +136,12 @@ def draw_bar() -> None:
     labels = _labels(prefs, session)
     pills = (
         min(_pill_w(labels.model, m, True), m.unit * 8),
-        _pill_w(labels.reasoning, m, True),
+        _pill_w(labels.reasoning, m, True) if labels.reasoning else None,
         min(_pill_w(labels.image, m, True), m.unit * 7) if labels.image else None,
     )
-    send_w = draw.text_width(labels.send, m.font_px) + m.font_px * 1.6 + m.unit * 1.4
+    send_w = draw.text_width(labels.send, m.small_px) + m.small_px * 1.4 + m.pad * 3
     left, right = _insets(area)
     busy = session is not None and session.busy
-    rows_limit = layout.MAX_LOG_ROWS if ui.expanded_log or ui.focused or busy else COLLAPSED_ROWS
     approval = session is not None and session.phase is Phase.APPROVAL
     common: dict[str, Any] = {
         "left_inset": left,
@@ -219,19 +160,27 @@ def draw_bar() -> None:
     text_w = base.field.w - 2 * m.pad
     buffer = ui.buffer
     spans = wrap(buffer.text, text_w, lambda s: draw.text_width(s, m.font_px)) if buffer.text else [Span(0, 0)]
-    rows = log_rows(session.log if session else [], pal, m.small_px, base.card.w - 2 * m.pad - m.unit, rows_limit)
-    bar = layout.compute(region.width, region.height, m, text_lines=len(spans), log_rows=len(rows), **common)
+    row_h = _row_h(m)
+    text_area = base.field.w - _marker_w(m) - m.unit * 0.6
+    lines = transcript.build(session.log if session else [], lambda s: draw.text_width(s, m.small_px), text_area, m.unit * 0.9)
+    content = transcript.content_height(lines, row_h)
+    if ui.expanded_log:
+        limit = min(region.height * LOG_EXPANDED_SHARE, LOG_EXPANDED_ROWS * row_h)
+    else:
+        limit = (LOG_ACTIVE_ROWS if ui.focused or busy else LOG_IDLE_ROWS) * row_h
+    usage = transcript.usage_parts(session.usage) if session is not None else []
+    bar = layout.compute(region.width, region.height, m, text_lines=len(spans), log_height=min(content, limit), log_header=bool(lines and usage), **common)
     if bar is None:
         return
-    shown = rows[len(rows) - len(bar.log_rows) :] if bar.log_rows else []
-    bar.log_rows = [(rect, row.entry_id) for (rect, _), row in zip(bar.log_rows, shown, strict=True)]
+    if bar.log_view is not None:
+        ui.log_scroll.sync(content, bar.log_view.h)
     st.ui.layouts[region.as_pointer()] = bar
 
     gpu.state.blend_set("ALPHA")
     try:
-        _draw_log(bar, shown, m, pal)
         _draw_tabs(bar, m, pal, prefs.mode)
         _draw_card(bar, m, pal, labels, spans, busy)
+        _draw_log(bar, lines, content, m, pal, usage)
         _draw_dropdown(bar, region, m, pal)
     finally:
         gpu.state.blend_set("NONE")
@@ -267,34 +216,107 @@ def _draw_loading(area: Any, region: Any) -> None:
         gpu.state.blend_set("NONE")
 
 
-def _draw_log(bar: BarLayout, rows: list[Row], m: layout.Metrics, pal: theme.Palette) -> None:
+def _draw_log(bar: BarLayout, lines: list[Line], content: float, m: layout.Metrics, pal: theme.Palette, usage: list[str]) -> None:
     if bar.log_panel is None:
         return
     panel = bar.log_panel
-    _shadow(panel, m.radius, m, pal)
-    draw.rounded_rect(panel, m.radius, pal.log_bg, pal.bar_outline)
-    t = time.monotonic()
-    for (rect, _), row in zip(bar.log_rows, rows, strict=True):
-        x = rect.x
-        if row.spinning:
-            draw.spinner(Rect(x, rect.y, rect.h, rect.h), t, row.dot or pal.accent)
-            x += rect.h
-        elif row.dot is not None:
-            draw.status_dot(x + rect.h * 0.4, rect.cy, rect.h * 0.16, row.dot)
-            x += rect.h * 0.85
-        y = draw.baseline(rect, m.small_px)
-        avail = rect.right - x
-        label = draw.ellipsize(row.text, m.small_px, avail)
-        draw.text(x, y, label, m.small_px, row.color)
-        if row.suffix:
-            used = draw.text_width(label, m.small_px) + m.pad
-            rest = avail - used
-            if rest > m.unit * 2:
-                draw.text(x + used, y, draw.ellipsize(row.suffix, m.small_px, rest), m.small_px, pal.text_dim)
+    rule = max(1.0, m.scale)
+    draw.rounded_rect(Rect(panel.x, round((panel.y + bar.field.top) / 2), panel.w, rule), 0, theme.rgba(pal.card_text, 0.1))
+    if bar.log_header is not None:
+        _draw_usage(bar.log_header, m, pal, usage)
+    bar.log_rows = []
+    bar.log_latest = None
+    if bar.log_view is not None and bar.log_view.h > 0 and lines:
+        _draw_lines(bar, bar.log_view, lines, content, m, pal)
     if bar.approve and bar.deny:
         for rect, label, fill, fg in ((bar.approve, "Run", pal.accent, pal.accent_text), (bar.deny, "Deny", pal.button, pal.button_text)):
             draw.rounded_rect(rect, m.radius * 0.8, fill, pal.bar_outline)
             draw.text(rect.cx - draw.text_width(label, m.small_px) / 2, draw.baseline(rect, m.small_px), label, m.small_px, fg)
+
+
+def _draw_usage(header: Rect, m: layout.Metrics, pal: theme.Palette, usage: list[str]) -> None:
+    size = m.small_px
+    parts = list(usage)
+    while parts:
+        label = "Tokens  " + " · ".join(parts)
+        if draw.text_width(label, size) <= header.w:
+            draw.text(header.right - draw.text_width(label, size), draw.baseline(header, size), label, size, pal.card_text_dim)
+            return
+        parts.pop()
+
+
+def _draw_lines(bar: BarLayout, view: Rect, lines: list[Line], content: float, m: layout.Metrics, pal: theme.Palette) -> None:
+    row_h = _row_h(m)
+    marker_w = _marker_w(m)
+    indent_w = m.unit * 0.9
+    scroll = state.get().ui.log_scroll
+    size = m.small_px
+    t = time.monotonic()
+    y = view.top + max(0.0, content - view.h) - scroll.offset
+    band = theme.rgba(pal.card_text, 0.06)
+    for line in lines:
+        h = line.height * row_h
+        top, bottom = y, y - h
+        y = bottom
+        if bottom >= view.top or top <= view.y or not line.height >= 1.0:
+            continue
+        rect = Rect(view.x, bottom, view.w, h)
+        baseline = draw.baseline(rect, size)
+        if baseline - size * 0.3 < view.y or baseline + size * 0.85 > view.top:
+            continue
+        inside = bottom >= view.y - 0.5 and top <= view.top + 0.5
+        if line.band and inside:
+            draw.rounded_rect(Rect(view.x - m.pad * 0.5, bottom, view.w + m.pad, h), 0, band)
+        x = view.x + line.indent * indent_w
+        if inside:
+            _draw_marker(line, Rect(x, bottom, marker_w, h), m, pal, t)
+        x += marker_w
+        color = _tone(line.tone, pal)
+        avail = view.right - x - m.unit * 0.4
+        label = draw.ellipsize(line.text, size, avail)
+        draw.text(x, baseline, label, size, color, clip=view)
+        if line.suffix:
+            used = draw.text_width(label, size) + m.pad * 1.5
+            if avail - used > m.unit * 2:
+                draw.text(x + used, baseline, draw.ellipsize(line.suffix, size, avail - used), size, pal.card_text_dim, clip=view)
+        if line.entry_id >= 0 and inside:
+            bar.log_rows.append((rect, line.entry_id))
+    if content > view.h + 0.5:
+        _draw_log_scrollbar(view, content, scroll.offset, m, pal)
+    if not scroll.following:
+        label = "Latest"
+        w = draw.text_width(label, size) + m.pad * 2 + size
+        pill = Rect(view.right - w - m.pad, view.y + m.pad * 0.5, w, row_h)
+        draw.rounded_rect(pill, pill.h / 2, pal.pill, pal.bar_outline)
+        draw.text(pill.x + m.pad, draw.baseline(pill, size), label, size, pal.pill_text)
+        draw.glyph_chevron(pill.right - m.pad - size * 0.3, pill.cy, size * 0.25, pal.pill_text)
+        bar.log_latest = pill
+
+
+def _draw_marker(line: Line, rect: Rect, m: layout.Metrics, pal: theme.Palette, t: float) -> None:
+    color = _tone(line.marker_tone or line.tone, pal)
+    cx, cy = rect.x + rect.w * 0.4, rect.cy
+    if line.marker == "user":
+        draw.text(rect.x + rect.w * 0.2, draw.baseline(rect, m.small_px), "›", m.small_px, theme.mix(pal.card_text, pal.accent, 0.6))
+    elif line.marker == "dot":
+        draw.status_dot(cx, cy, rect.h * 0.15, color)
+    elif line.marker == "spin":
+        side = rect.h * 0.8
+        draw.spinner(Rect(cx - side / 2, cy - side / 2, side, side), t, color)
+    elif line.marker == "thought":
+        draw.glyph_sparkle(cx, cy, rect.h * 0.22, pal.card_text_dim)
+    elif line.marker == "tree":
+        stroke = max(1.0, m.scale)
+        dim = theme.rgba(pal.card_text_dim, 0.8)
+        draw.rounded_rect(Rect(cx - stroke / 2, cy, stroke, rect.h * 0.55), 0, dim)
+        draw.rounded_rect(Rect(cx - stroke / 2, cy, rect.w * 0.45, stroke), 0, dim)
+
+
+def _draw_log_scrollbar(view: Rect, content: float, offset: float, m: layout.Metrics, pal: theme.Palette) -> None:
+    track = Rect(view.right - m.scale * 3, view.y, m.scale * 2, view.h)
+    thumb = max(m.unit * 0.6, track.h * view.h / content)
+    y = track.y + (track.h - thumb) * min(1.0, offset / max(1.0, content - view.h))
+    draw.rounded_rect(Rect(track.x, y, track.w, thumb), track.w / 2, theme.rgba(pal.card_text, 0.35))
 
 
 def _draw_tabs(bar: BarLayout, m: layout.Metrics, pal: theme.Palette, active: str) -> None:
@@ -398,19 +420,18 @@ def _draw_card(bar: BarLayout, m: layout.Metrics, pal: theme.Palette, labels: La
     active = busy or ready
     fill = pal.accent if active else pal.button
     fg = pal.accent_text if active else theme.rgba(pal.button_text, 0.45)
-    draw.rounded_rect(send, radius, fill)
-    label_w = draw.text_width(labels.send, m.font_px)
-    mark = m.font_px * 0.55
-    total = label_w + m.font_px * 0.5 + mark * 2
-    x = send.cx - total / 2
-    y = draw.baseline(send, m.font_px)
-    draw.text(x, y, labels.send, m.font_px, fg)
-    mx = x + label_w + m.font_px * 0.5 + mark
+    draw.rounded_rect(send, m.radius, theme.mix(fill, pal.pill_hover, 0.2) if ui.hover == "send" and active else fill, None if active else pal.bar_outline)
+    size = m.small_px
+    label_w = draw.text_width(labels.send, size)
+    icon = Rect(0, send.cy - send.h * 0.4, send.h * 0.8, send.h * 0.8)
+    x = send.cx - (label_w + m.pad * 0.6 + icon.w * 0.6) / 2
+    draw.text(x, draw.baseline(send, size), labels.send, size, fg)
+    icon = Rect(x + label_w + m.pad * 0.6 - icon.w * 0.2, icon.y, icon.w, icon.h)
     if busy and not question:
-        draw.spinner(Rect(mx - mark * 1.6, send.cy - mark * 1.6, mark * 3.2, mark * 3.2), time.monotonic(), fg)
-        draw.glyph_stop(Rect(mx - mark * 1.6, send.cy - mark * 1.6, mark * 3.2, mark * 3.2), fg)
+        draw.spinner(icon, time.monotonic(), fg)
+        draw.glyph_stop(icon, fg)
     else:
-        draw.glyph_sparkle(mx, send.cy, mark, fg)
+        draw.glyph_send(icon, fg)
 
 
 def dropdown_width(target: str, m: layout.Metrics) -> float:
@@ -500,7 +521,7 @@ def _placeholder(session: Any, focused: bool) -> str:
     if session is not None and session.busy:
         return "Working… press Esc or Stop to interrupt"
     if focused:
-        return "Describe what to make · Enter to generate · Shift+Enter new line · Tab switches tabs"
+        return "Describe what to make · Enter to submit · Shift+Enter new line · Tab switches tabs"
     return "Describe what you want to create…   (Ctrl+Space)"
 
 

@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 
 MAX_TEXT_LINES = 6
 MIN_TEXT_LINES = 2
-MAX_LOG_ROWS = 6
 
 
 @dataclass(frozen=True)
@@ -84,6 +83,9 @@ class BarLayout:
     tab_bar: Rect | None = None
     tabs: list[Tab] = field(default_factory=list)
     log_panel: Rect | None = None
+    log_header: Rect | None = None
+    log_view: Rect | None = None
+    log_latest: Rect | None = None
     log_rows: list[tuple[Rect, int]] = field(default_factory=list)
     approve: Rect | None = None
     deny: Rect | None = None
@@ -93,6 +95,7 @@ class BarLayout:
         for name, rect in (
             ("approve", self.approve),
             ("deny", self.deny),
+            ("log_latest", self.log_latest),
             ("send", self.send),
             ("attach", self.attach),
             ("gear", self.gear),
@@ -109,11 +112,11 @@ class BarLayout:
         for rect, entry_id in self.log_rows:
             if rect.contains(px, py):
                 return f"log:{entry_id}"
+        if self.log_panel is not None and self.log_panel.contains(px, py):
+            return "log"
         if self.card.contains(px, py):
             return "field"
-        if self.tab_bar is not None and self.tab_bar.contains(px, py):
-            return "tabs"
-        return "log" if self.log_panel is not None and self.log_panel.contains(px, py) else None
+        return "tabs" if self.tab_bar is not None and self.tab_bar.contains(px, py) else None
 
 
 def _tabs(card: Rect, m: Metrics, widths: Sequence[tuple[str, float, float]], active: str) -> tuple[Rect, list[Tab]]:
@@ -151,7 +154,8 @@ def compute(
     pill_widths: tuple[float | None, float | None, float | None] = (90.0, 90.0, 90.0),
     send_width: float | None = None,
     text_lines: int = 1,
-    log_rows: int = 0,
+    log_height: float = 0.0,
+    log_header: bool = False,
     approval: bool = False,
 ) -> BarLayout | None:
     u = m.unit
@@ -161,36 +165,46 @@ def compute(
 
     p = round(u * 0.45)
     ctl_h = round(u * 1.25)
+    gap = round(u * 0.3)
+    sep = round(p * 0.7)
     lines = max(MIN_TEXT_LINES, min(MAX_TEXT_LINES, text_lines))
     text_h = lines * m.line_h + round(u * 0.2)
-    card_h = p + ctl_h + round(p * 0.7) + text_h + p
-    card_w = min(avail_w, 36 * u)
+    base_h = p + ctl_h + sep + text_h + p
+    card_w = round(min(avail_w, 36 * u))
     cx = left_inset + (region_w - left_inset - right_inset) / 2
-    card = Rect(round(cx - card_w / 2), round(bottom_inset + u * 1.0), round(card_w), card_h)
+    x, y = round(cx - card_w / 2), round(bottom_inset + u * 1.0)
 
-    send_w = round(max(send_width or 0.0, u * 5.0))
-    send = Rect(card.right - p - send_w, card.y + p, send_w, card.h - 2 * p)
+    header_h = round(m.small_px * 2.0) if log_header else 0
+    action_h = round(u * 1.1) if approval else 0
+    tabs_h = round(u * 1.9) if tab_widths else 0
+    room = region_h - y - base_h - tabs_h - u - sep - header_h - action_h
+    view_h = round(max(0.0, min(log_height, room)))
+    if view_h < m.line_h and not approval:
+        view_h = 0
+    section = sep + action_h + view_h + header_h if view_h or approval else 0
+    card = Rect(x, y, card_w, base_h + section)
+
+    send_w = round(max(send_width or 0.0, u * 3.5))
     row_y = card.y + p
-    row_right = send.x - p
-    gear = Rect(row_right - ctl_h, row_y, ctl_h, ctl_h)
+    send = Rect(card.right - p - send_w, row_y, send_w, ctl_h)
+    gear = Rect(send.x - gap - ctl_h, row_y, ctl_h, ctl_h)
     attach = Rect(card.x + p, row_y, ctl_h, ctl_h)
-    field_rect = Rect(card.x + p, row_y + ctl_h + round(p * 0.7), row_right - card.x - p, text_h)
+    field_rect = Rect(card.x + p, row_y + ctl_h + sep, card.w - 2 * p, text_h)
 
-    gap = round(u * 0.3)
     wanted = list(pill_widths)
     while True:
-        x = attach.right + gap
+        px = attach.right + gap
         rects: list[Rect | None] = []
         fits = True
         for w in wanted:
             if w is None:
                 rects.append(None)
                 continue
-            rect = Rect(round(x), row_y, round(w), ctl_h)
+            rect = Rect(round(px), row_y, round(w), ctl_h)
             if rect.right > gear.x - gap:
                 fits = False
             rects.append(rect)
-            x = rect.right + gap
+            px = rect.right + gap
         if fits:
             break
         drop = next((i for i in (2, 1, 0) if wanted[i] is not None), None)
@@ -202,31 +216,17 @@ def compute(
     layout = BarLayout(
         card=card, field=field_rect, send=send, attach=attach, gear=gear, model_pill=rects[0], reasoning_pill=rects[1], image_pill=rects[2], lines=lines
     )
-    top = card.top
     if tab_widths:
         layout.tab_bar, layout.tabs = _tabs(card, m, tab_widths, active_tab)
-        top = layout.tab_bar.top
-
-    rows = max(0, min(MAX_LOG_ROWS, log_rows))
-    extra = 1 if approval else 0
-    space_above = region_h - top - u
-    row_h = round(u * 1.1)
-    lp = m.pad
-    while rows + extra > 0 and (rows + extra) * row_h + 2 * lp > space_above:
-        rows -= 1
-        if rows < 0:
-            rows, extra = 0, 0
-            break
-    if rows + extra > 0:
-        panel = Rect(card.x, top + round(u * 0.4), card.w, (rows + extra) * row_h + 2 * lp)
-        layout.log_panel = panel
-        y = panel.top - lp - row_h
-        if extra:
-            btn_w = round(u * 3.2)
-            layout.deny = Rect(panel.right - lp - btn_w, y + 2, btn_w, row_h - 4)
-            layout.approve = Rect(layout.deny.x - lp * 0.5 - btn_w, y + 2, btn_w, row_h - 4)
-            y -= row_h
-        for _ in range(rows):
-            layout.log_rows.append((Rect(panel.x + lp, y, panel.w - 2 * lp, row_h), -1))
-            y -= row_h
+    if not section:
+        return layout
+    panel = Rect(field_rect.x, field_rect.top + sep, field_rect.w, action_h + view_h + header_h)
+    layout.log_panel = panel
+    layout.log_view = Rect(panel.x, panel.y + action_h, panel.w, view_h)
+    if header_h:
+        layout.log_header = Rect(panel.x, layout.log_view.top, panel.w, header_h)
+    if approval:
+        btn_w = round(u * 3.2)
+        layout.deny = Rect(panel.right - btn_w, panel.y + 2, btn_w, action_h - 4)
+        layout.approve = Rect(layout.deny.x - round(m.pad * 0.5) - btn_w, panel.y + 2, btn_w, action_h - 4)
     return layout

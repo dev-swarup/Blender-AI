@@ -28,7 +28,6 @@ class Palette:
     field: RGBA
     field_active: RGBA
     text: RGBA
-    text_dim: RGBA
     pill: RGBA
     pill_hover: RGBA
     pill_text: RGBA
@@ -40,8 +39,6 @@ class Palette:
     accent_text: RGBA
     error: RGBA
     warning: RGBA
-    log_bg: RGBA
-    log_text: RGBA
     shadow: RGBA
     caret: RGBA
     card_text: RGBA
@@ -77,7 +74,6 @@ def palette() -> Palette:
     toggle = ui.wcol_toggle
     tool = ui.wcol_tool
     regular = ui.wcol_regular
-    tip = ui.wcol_tooltip
     tab = getattr(ui, "wcol_tab", toggle)
     item = ui.wcol_menu_item
     base_text = rgba(text.text)
@@ -88,7 +84,6 @@ def palette() -> Palette:
         field=rgba(text.inner),
         field_active=rgba(text.inner_sel),
         text=base_text,
-        text_dim=rgba(base_text, 0.55),
         pill=rgba(regular.inner),
         pill_hover=mix(rgba(regular.inner), rgba(regular.inner_sel), 0.35),
         pill_text=rgba(regular.text),
@@ -100,8 +95,6 @@ def palette() -> Palette:
         accent_text=rgba(tool.text_sel),
         error=_status(theme, "error", (0.9, 0.25, 0.25, 1.0)),
         warning=_status(theme, "warning", (0.9, 0.6, 0.15, 1.0)),
-        log_bg=rgba(tip.inner, max(0.9, tip.inner[3])),
-        log_text=rgba(tip.text),
         shadow=(0.0, 0.0, 0.0, shadow_alpha),
         caret=rgba(ui.widget_text_cursor) if hasattr(ui, "widget_text_cursor") else base_text,
         card_text=rgba(menu.text),

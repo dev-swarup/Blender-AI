@@ -6,6 +6,7 @@ from typing import Any
 from .agent.bridge import Bridge
 from .models import ModelInfo
 from .ui.textedit import TextBuffer
+from .ui.transcript import Scroll
 
 
 @dataclass
@@ -16,6 +17,7 @@ class UIState:
     layouts: dict[int, Any] = field(default_factory=dict)
     caret_visible: bool = True
     expanded_log: bool = False
+    log_scroll: Scroll = field(default_factory=Scroll)
     hover: str | None = None
     pressed: str | None = None
     dropdown: Any = None

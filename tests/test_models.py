@@ -78,6 +78,7 @@ def test_anthropic_list_with_capabilities() -> None:
                 "capabilities": {
                     "thinking": {"types": {"adaptive": {"supported": True}, "disabled": {"supported": False}}},
                     "image_input": {"supported": True},
+                    "effort": {"supported": True, "low": {"supported": True}, "high": {"supported": True}, "max": {"supported": True}},
                 },
             }
         ]
@@ -86,6 +87,7 @@ def test_anthropic_list_with_capabilities() -> None:
     assert info.label == "Claude Opus 5.5" and info.vision is True and info.max_output == 128000
     caps = models.anthropic_caps(info.id, info)
     assert caps.thinking == "always" and caps.max_output == 128000
+    assert info.efforts == ("low", "high", "max")
 
 
 def test_bare_lists_and_garbage() -> None:
@@ -120,3 +122,59 @@ def test_anthropic_params() -> None:
     assert budget["thinking"] == {"type": "enabled", "budget_tokens": 8000}
     assert budget["max_tokens"] >= 16000 and "output_config" not in budget
     assert models.anthropic_params(models.anthropic_caps("llama"), "high") == {"max_tokens": 32000}
+    assert models.anthropic_params(always, "max")["output_config"] == {"effort": "max"}
+    deep = models.anthropic_params(models.anthropic_caps("claude-haiku-4-5"), "xhigh")
+    assert deep["thinking"]["budget_tokens"] == 24000 and deep["max_tokens"] == 48000
+
+
+def test_openrouter_lists_reasoning_efforts() -> None:
+    payload = {
+        "data": [
+            {"id": "a/thinker", "reasoning": {"supported_efforts": ["max", "xhigh", "high", "medium", "low", "none"], "default_effort": "high"}},
+            {"id": "b/mandatory", "supported_parameters": ["reasoning", "tools"], "reasoning": {"mandatory": True}},
+            {"id": "c/plain"},
+        ]
+    }
+    thinker, mandatory, plain = models.parse_models(payload)
+    assert thinker.efforts == ("none", "low", "medium", "high", "xhigh", "max") and thinker.default_effort == "high"
+    assert mandatory.efforts == () and mandatory.reasoning is True and plain.reasoning is None
+
+
+def test_offered_efforts_fall_back_when_nothing_is_listed() -> None:
+    models.forget_rejections()
+    listed = models.ModelInfo("a/thinker", efforts=("low", "high"))
+    assert models.offered_efforts("OPENAI", "a/thinker", listed) == ("low", "high"), "a listing wins"
+    assert models.offered_efforts("OPENAI", "b/mandatory", models.ModelInfo("b/mandatory", reasoning=True)) == models.STANDARD_EFFORTS
+    assert models.offered_efforts("OPENAI", "c/plain", models.ModelInfo("c/plain", reasoning=False)) == (), "the listing says no reasoning"
+    assert models.offered_efforts("OPENAI", "local-model", None) == models.STANDARD_EFFORTS, "unknown: the common levels"
+    assert models.offered_efforts("OPENAI", "gpt-5-mini", None) == ("minimal", "low", "medium", "high")
+    assert models.offered_efforts("OPENAI", "gpt-5.2", None)[-1] == "xhigh" and models.offered_efforts("OPENAI", "gpt-4o", None) == ()
+    assert models.offered_efforts("ANTHROPIC", "claude-opus-5-5", None) == models.EFFORTS
+    assert models.offered_efforts("ANTHROPIC", "llama-3", None) == ()
+    key = models.effort_key("https://api.example.com/v1/", "m")
+    models.reject_effort(key, "max")
+    assert models.offered_efforts("ANTHROPIC", "claude-opus-5-5", None, key) == ("low", "medium", "high", "xhigh"), "a rejected edge level is dropped"
+    models.reject_effort(key, "medium")
+    assert models.offered_efforts("ANTHROPIC", "claude-opus-5-5", None, key) == (), "a rejected middle level means no effort parameter"
+    models.forget_rejections()
+
+
+def test_context_window_from_listings() -> None:
+    payload = [{"id": "or/model", "context_length": 262144}, {"id": "claude-x", "max_input_tokens": 1_000_000}, {"id": "bare"}]
+    contexts = {m.id: m.context for m in models.parse_models(payload)}
+    assert contexts == {"bare": None, "claude-x": 1_000_000, "or/model": 262144}
+
+
+def test_effective_effort_uses_only_listed_levels() -> None:
+    listed = ("low", "medium", "high")
+    assert models.effective_effort("high", listed) == "high"
+    assert models.effective_effort("max", listed) == "high", "nearest listed level below"
+    assert models.effective_effort("minimal", listed) == "low", "lowest listed level when nothing is below"
+    assert models.effective_effort("auto", listed) == "auto"
+    assert models.effective_effort("high", ()) == "auto", "nothing listed: send no effort"
+    assert models.effective_effort("none", ("none", "low")) == "none"
+    assert models.effective_effort("minimal", ("none", "medium")) == "medium", "never silently turns thinking off"
+
+
+def test_reasoning_level_labels() -> None:
+    assert all(level in models.LEVEL_LABELS and level in models.LEVEL_HINTS for level in models.REASONING_LEVELS)
