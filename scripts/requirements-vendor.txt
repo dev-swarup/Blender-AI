@@ -1,0 +1,9 @@
+# Bundled into the extension by scripts/vendor_wheels.py. Pin exact versions for reproducible builds.
+# Anthropic agent
+anthropic==1.15.0
+# OpenAI-compatible agent (OpenAI Agents SDK) and MCP client support
+openai==3.35.1
+openai-agents==0.24.0
+mcp==2.3.0
+# 49+ dropped Intel-macOS wheels; MCP only needs it for its server-side helpers.
+cryptography==48.0.1
