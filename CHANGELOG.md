@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-10-19
 
 ### Added
 
@@ -61,7 +61,7 @@ All notable changes to this project are documented in this file. The format foll
   suite's first render for lack of `libEGL.so.1`, and the suite now prints each case and the Python stack
   if Blender crashes.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - Not published
 
 ### Added
 
@@ -91,7 +91,7 @@ All notable changes to this project are documented in this file. The format foll
 - Switching tabs no longer resets the conversation.
 - Roughness maps are derived from the base color relative to its average brightness.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - Not published
 
 ### Added
 
