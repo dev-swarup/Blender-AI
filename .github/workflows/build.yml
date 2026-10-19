@@ -31,16 +31,25 @@ jobs:
         run: |
           pip install uv
           python scripts/vendor_wheels.py
-      - name: Build the zip
-        run: python scripts/build.py --blender "$BLENDER"
+      - name: Check the tag matches the manifest version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "v$(sed -n 's/^version = "\(.*\)"$/\1/p' src/blender_manifest.toml)" = "$GITHUB_REF_NAME"
+      - name: Build the zip and the repository listing
+        env:
+          RELEASE_URL: ${{ startsWith(github.ref, 'refs/tags/') && format('{0}/{1}/releases/download/{2}', github.server_url, github.repository, github.ref_name) || '' }}
+        run: python scripts/build.py --blender "$BLENDER" ${RELEASE_URL:+--download-url "$RELEASE_URL"}
       - uses: actions/upload-artifact@v4
         with:
           name: blender_ai-zip
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/index.json
           if-no-files-found: error
       - name: Attach to the GitHub release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.zip
+          files: |
+            dist/*.zip
+            dist/index.json
           generate_release_notes: true

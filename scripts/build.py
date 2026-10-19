@@ -2,16 +2,21 @@
 
     python scripts/build.py              # -> dist/blender_ai-<version>.zip
     python scripts/build.py --vendor     # download the wheels first
+    python scripts/build.py --download-url https://github.com/<owner>/<repo>/releases/download/v<version>
     python scripts/build.py --blender "C:/Program Files/Blender Foundation/Blender 5.2/blender.exe"
 
 Steps: stage src/ into build/, list every bundled wheel in the staged manifest (with the platforms those
 wheels cover), then run `blender --command extension build` and validate. On install, Blender extracts
 only the wheels that match the user's platform and Python version.
+
+With --download-url it also writes dist/index.json, the listing Blender reads from a remote repository to
+offer updates; the zip is expected to be published at that URL.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -77,10 +82,21 @@ def warn_long_paths(wheels: list[str]) -> None:
         print(f"WARNING: {member} is {longest} characters; Windows users with long profile paths may fail to install.")
 
 
+def write_index(blender: str, zip_path: Path, download_url: str) -> Path:
+    subprocess.run([blender, "--factory-startup", "--command", "extension", "server-generate", "--repo-dir", str(DIST)], check=True)
+    index = DIST / "index.json"
+    listing = json.loads(index.read_text(encoding="utf-8"))
+    for entry in listing["data"]:
+        entry["archive_url"] = f"{download_url.rstrip('/')}/{zip_path.name}"
+    index.write_text(json.dumps(listing, indent=2) + "\n", encoding="utf-8")
+    return index
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--blender")
     parser.add_argument("--vendor", action="store_true", help="download wheels first")
+    parser.add_argument("--download-url", help="folder URL the zip will be published at; also writes dist/index.json")
     args = parser.parse_args()
     if args.vendor:
         subprocess.run([sys.executable, str(ROOT / "scripts" / "vendor_wheels.py")], check=True)
@@ -89,12 +105,14 @@ def main() -> int:
     print(f"Staged {len(wheels)} wheels for {', '.join(platforms)}")
     warn_long_paths(wheels)
     DIST.mkdir(exist_ok=True)
-    for old in DIST.glob("blender_ai-*.zip"):
-        old.unlink()
+    for old in (*DIST.glob("blender_ai-*.zip"), DIST / "index.json"):
+        old.unlink(missing_ok=True)
     subprocess.run([blender, "--factory-startup", "--command", "extension", "build", "--source-dir", str(STAGE), "--output-dir", str(DIST)], check=True)
     zip_path = next(DIST.glob("blender_ai-*.zip"))
     subprocess.run([blender, "--factory-startup", "--command", "extension", "validate", str(zip_path)], check=True)
     print(f"Built {zip_path.relative_to(ROOT)} ({zip_path.stat().st_size / 1e6:.1f} MB)")
+    if args.download_url:
+        print(f"Wrote {write_index(blender, zip_path, args.download_url).relative_to(ROOT)}")
     return 0
 
 
