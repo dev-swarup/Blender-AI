@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+build/
+dist/
+*.zip
+
+src/wheels/*.whl
+
+.DS_Store
+Thumbs.db
+*.blend1

@@ -1,0 +1,40 @@
+[project]
+name = "blender-ai"
+version = "0.3.0"
+description = "Blender AI: a prompt bar in the 3D Viewport that models, textures, rigs and animates through typed tools"
+license = "GPL-3.0-or-later"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "numpy>=1.26", "anthropic>=1.0"]
+
+[tool.ruff]
+line-length = 160
+target-version = "py311"
+extend-exclude = ["src/wheels"]
+
+[tool.ruff.format]
+skip-magic-trailing-comma = true
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "C4", "PIE", "RET", "PERF", "ISC", "FLY", "RSE", "FURB", "PLR1714", "PLR1730", "PLR5501", "PLW0120"]
+ignore = ["E501", "RUF001", "RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402"]
+"tests/{conftest,run_tools,ui_smoke}.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["blender_ai"]
+split-on-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = false
+warn_unused_ignores = true
+files = ["src/tools/registry.py", "src/agent", "src/models.py", "src/imaging/pbr.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
