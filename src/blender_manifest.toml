@@ -1,0 +1,32 @@
+schema_version = "1.0.0"
+
+id = "blender_ai"
+version = "0.3.0"
+name = "Blender AI"
+tagline = "AI prompt bar that models, textures, rigs and animates"
+maintainer = "Swarup B."
+type = "add-on"
+
+tags = ["3D View", "Modeling", "Material", "Rigging", "Animation"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+copyright = ["2026 Swarup B."]
+
+platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
+
+# The `wheels` list is written by scripts/build.py from the wheels vendored for each platform.
+
+[permissions]
+network = "Talk to your AI provider, generate images, fetch models, use MCP"
+files = "Save textures and downloaded models, start your MCP servers"
+clipboard = "Paste text into the prompt bar and paste MCP configs"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "*.pyc",
+  "/.git/",
+  "/*.zip",
+]
