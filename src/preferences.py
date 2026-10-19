@@ -9,6 +9,7 @@ from bpy.types import AddonPreferences, PropertyGroup
 
 from . import models, state
 from .agent.config import AgentConfig
+from .integrations import registry as helpers
 from .providers import ANTHROPIC_URL, OPENAI_URL
 from .tools.registry import Mode
 
@@ -140,8 +141,11 @@ class BlenderAIPreferences(AddonPreferences):
     )
     normal_convention: EnumProperty(name="Normal maps", items=[("OPENGL", "OpenGL (Blender)", ""), ("DIRECTX", "DirectX", "")], default="OPENGL")
 
+    helpers_prompted: BoolProperty(name="Asked about helper add-ons", default=False, options={"HIDDEN"})
+
     show_images: BoolProperty(name="Separate image API", default=False)
     show_mcp: BoolProperty(name="MCP servers", default=False)
+    show_helpers: BoolProperty(name="Helper add-ons", default=False)
     show_more: BoolProperty(name="More options", default=False)
 
     def current_mode(self) -> Mode:
@@ -240,6 +244,8 @@ class BlenderAIPreferences(AddonPreferences):
         _section(layout, self, "show_images", "Separate image API (optional)", "IMAGE_DATA", self._draw_images)
         count = len(self.mcp_servers)
         _section(layout, self, "show_mcp", f"MCP servers ({count})", "PLUGIN", self._draw_mcp)
+        ready = len(helpers.HELPERS) - len(helpers.missing())
+        _section(layout, self, "show_helpers", f"Helper add-ons ({ready} of {len(helpers.HELPERS)} ready)", "PACKAGE", self._draw_helpers)
         _section(layout, self, "show_more", "More options", "PREFERENCES", self._draw_more)
 
         col = layout.column()
@@ -285,6 +291,15 @@ class BlenderAIPreferences(AddonPreferences):
         if state.get().connection.get("mcp"):
             col.label(text=state.get().connection["mcp"], icon="INFO")
         col.label(text="New MCP tools are used from the next new conversation.", icon="INFO")
+
+    def _draw_helpers(self, col: Any) -> None:
+        col.label(text="Blender AI builds better models, rigs and characters with these add-ons.")
+        for helper in helpers.HELPERS.values():
+            status = helpers.status(helper)
+            row = col.row()
+            row.label(text=helper.name, icon="CHECKBOX_HLT" if status == "enabled" else "CHECKBOX_DEHLT")
+            row.label(text=status.capitalize())
+        col.operator("blender_ai.install_helpers", icon="IMPORT")
 
     def _draw_more(self, col: Any) -> None:
         col.prop(self, "confirm_python")

@@ -64,8 +64,8 @@ def _collection_tree(col: bpy.types.Collection) -> dict[str, Any]:
 
 @tool(obj({}), group="meta", mutates=False)
 def get_capabilities() -> dict[str, Any]:
-    """Report optional helpers (Rigify, MPFB, LoopTools, Extra Objects) and whether each is installed and
-    enabled, whether image generation is configured (and with which model), the connected MCP servers, and
+    """Report the helper add-ons (Rigify, MPFB, LoopTools, Extra Mesh Objects) and whether each is installed
+    and enabled, whether image generation is configured (and with which model), the connected MCP servers, and
     the Blender version. Call this before relying on a helper add-on or on image generation."""
     from .. import state
     from ..preferences import get_prefs

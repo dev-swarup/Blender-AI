@@ -80,6 +80,7 @@ def start() -> None:
     bpy.app.timers.register(_tick, first_interval=0.05, persistent=True)
     st.timers.append(_tick)
     bpy.app.timers.register(_startup, first_interval=1.0)
+    dialogs.open_helpers_prompt_later()
     for handler_list, fn in ((bpy.app.handlers.load_post, _on_load), (bpy.app.handlers.save_pre, _on_save)):
         handler_list.append(fn)
         st.handlers.append((handler_list, fn))
@@ -94,8 +95,9 @@ def unregister() -> None:
         st.session.stop()
     if st.mcp is not None:
         st.mcp.shutdown()
-    if bpy.app.timers.is_registered(_startup):
-        bpy.app.timers.unregister(_startup)
+    for fn in (_startup, dialogs.open_helpers_prompt):
+        if bpy.app.timers.is_registered(fn):
+            bpy.app.timers.unregister(fn)
     for module in reversed(UI_MODULES):
         with contextlib.suppress(RuntimeError):
             module.unregister()
