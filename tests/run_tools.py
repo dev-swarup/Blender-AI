@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import faulthandler
 import os
 import sys
 import tempfile
@@ -671,19 +672,17 @@ def agent_session_with_scripted_agent() -> None:
 
 
 def main() -> int:
+    faulthandler.enable()
     only = os.environ.get("BLENDER_AI_TESTS")
     for fn in CASES:
         if only and fn.__name__ not in only.split(","):
             continue
+        print(f"RUN   {fn.__name__}", flush=True)
         fn()
-    width = max(len(n) for n, _, _ in RESULTS)
-    failed = 0
-    for name, ok, detail in RESULTS:
-        print(f"{'PASS' if ok else 'FAIL'}  {name.ljust(width)}")
-        if not ok:
-            failed += 1
-            print("      " + detail.replace("\n", "\n      "))
-    print(f"\n{len(RESULTS) - failed}/{len(RESULTS)} passed")
+        name, ok, detail = RESULTS[-1]
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else "\n      " + detail.replace("\n", "\n      ")), flush=True)
+    failed = [name for name, ok, _ in RESULTS if not ok]
+    print(f"\n{len(RESULTS) - len(failed)}/{len(RESULTS)} passed" + (f"; failed: {', '.join(failed)}" if failed else ""), flush=True)
     return 1 if failed else 0
 
 

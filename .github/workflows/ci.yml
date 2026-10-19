@@ -42,7 +42,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: System libraries
-        run: sudo apt-get update && sudo apt-get install -y libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libsm6
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libxi6 libxkbcommon0 libxxf86vm1 libxfixes3 libxrender1 libgl1 libsm6
+          libegl1 libegl-mesa0 libgl1-mesa-dri libglx-mesa0 xvfb
       - name: Download Blender ${{ matrix.blender }}
         env:
           BLENDER_VERSION: ${{ matrix.blender }}
@@ -51,4 +54,4 @@ jobs:
           curl -fsSL "https://download.blender.org/release/Blender${series}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" | tar -xJ
           echo "BLENDER=$PWD/blender-${BLENDER_VERSION}-linux-x64/blender" >> "$GITHUB_ENV"
       - name: Tool suite
-        run: '"$BLENDER" -b --factory-startup --python-exit-code 1 --python tests/run_tools.py'
+        run: xvfb-run -a -s "-screen 0 1280x720x24" "$BLENDER" -b --factory-startup --python-exit-code 1 --python tests/run_tools.py
