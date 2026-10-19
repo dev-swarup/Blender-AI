@@ -16,8 +16,6 @@ copyright = ["2026 Swarup B."]
 
 platforms = ["windows-x64", "macos-arm64", "macos-x64", "linux-x64"]
 
-# The `wheels` list is written by scripts/build.py from the wheels vendored for each platform.
-
 [permissions]
 network = "Talk to your AI provider, generate images, fetch models, use MCP"
 files = "Save textures and downloaded models, start your MCP servers"

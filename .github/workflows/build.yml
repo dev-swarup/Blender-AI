@@ -31,11 +31,11 @@ jobs:
         run: |
           pip install uv
           python scripts/vendor_wheels.py
-      - name: Build per-platform zips
+      - name: Build the zip
         run: python scripts/build.py --blender "$BLENDER"
       - uses: actions/upload-artifact@v4
         with:
-          name: blender_ai-zips
+          name: blender_ai-zip
           path: dist/*.zip
           if-no-files-found: error
       - name: Attach to the GitHub release
