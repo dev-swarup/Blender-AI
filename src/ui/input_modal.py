@@ -212,7 +212,6 @@ def handle_click(context: Any, hit: str, region: Any = None) -> bool:
 
 class BLENDER_AI_OT_prompt_input(bpy.types.Operator):
     bl_description = "Type into the Blender AI prompt bar"
-
     bl_idname = "blender_ai.prompt_input"
     bl_label = "Blender AI Prompt"
     bl_options = {"INTERNAL"}
@@ -411,7 +410,6 @@ class BLENDER_AI_OT_prompt_input(bpy.types.Operator):
 
 class BLENDER_AI_OT_focus_bar(bpy.types.Operator):
     bl_description = "Focus the Blender AI prompt bar (press again to leave it)"
-
     bl_idname = "blender_ai.focus_bar"
     bl_label = "Blender AI: Focus Prompt Bar"
 
@@ -429,7 +427,6 @@ class BLENDER_AI_OT_focus_bar(bpy.types.Operator):
 
 class BLENDER_AI_OT_bar_click(bpy.types.Operator):
     bl_description = "Handle a click on the Blender AI prompt bar"
-
     bl_idname = "blender_ai.bar_click"
     bl_label = "Blender AI: Bar Click"
     bl_options = {"INTERNAL"}
@@ -451,7 +448,6 @@ class BLENDER_AI_OT_bar_click(bpy.types.Operator):
 
 class BLENDER_AI_OT_escape(bpy.types.Operator):
     bl_description = "Stop the running Blender AI request"
-
     bl_idname = "blender_ai.escape"
     bl_label = "Blender AI: Stop"
     bl_options = {"INTERNAL"}
@@ -467,7 +463,6 @@ class BLENDER_AI_OT_escape(bpy.types.Operator):
 
 class BLENDER_AI_OT_approve(bpy.types.Operator):
     bl_description = "Approve or deny the pending run_python call"
-
     bl_idname = "blender_ai.approve"
     bl_label = "Approve"
     bl_options = {"INTERNAL"}

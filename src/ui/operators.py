@@ -128,7 +128,6 @@ def _image_items(_self: Any, _context: Any) -> list[tuple[Any, ...]]:
 
 class BLENDER_AI_OT_choose_model(bpy.types.Operator):
     bl_description = "Pick the AI model (searchable list from your API's /models)"
-
     bl_idname = "blender_ai.choose_model"
     bl_label = "Choose Model"
     bl_property = "choice"
@@ -153,7 +152,6 @@ class BLENDER_AI_OT_choose_model(bpy.types.Operator):
 
 class BLENDER_AI_OT_choose_image_model(bpy.types.Operator):
     bl_description = "Pick the image model used for generated textures"
-
     bl_idname = "blender_ai.choose_image_model"
     bl_label = "Choose Image Model"
     bl_property = "choice"
@@ -178,7 +176,6 @@ class BLENDER_AI_OT_choose_image_model(bpy.types.Operator):
 
 class BLENDER_AI_OT_refresh_models(bpy.types.Operator):
     bl_description = "Reload the model lists from the API"
-
     bl_idname = "blender_ai.refresh_models"
     bl_label = "Refresh Models"
 
@@ -192,7 +189,6 @@ class BLENDER_AI_OT_refresh_models(bpy.types.Operator):
 
 class BLENDER_AI_OT_use_preset(bpy.types.Operator):
     bl_description = "Use this provider's API URL"
-
     bl_idname = "blender_ai.use_preset"
     bl_label = "Use Provider"
     bl_options = {"INTERNAL"}
@@ -215,7 +211,6 @@ class BLENDER_AI_OT_use_preset(bpy.types.Operator):
 
 class BLENDER_AI_OT_test_llm(bpy.types.Operator):
     bl_description = "Check the URL and key, load the model list and send a one-word request"
-
     bl_idname = "blender_ai.test_llm"
     bl_label = "Test Connection"
 
@@ -249,7 +244,6 @@ class BLENDER_AI_OT_test_llm(bpy.types.Operator):
 
 class BLENDER_AI_OT_test_image(bpy.types.Operator):
     bl_description = "Check the image API URL and key"
-
     bl_idname = "blender_ai.test_image"
     bl_label = "Test Image API"
 
@@ -296,7 +290,6 @@ def connect_mcp(reconnect: bool = False) -> None:
 
 class BLENDER_AI_OT_mcp_add(bpy.types.Operator):
     bl_description = "Add an MCP server"
-
     bl_idname = "blender_ai.mcp_add"
     bl_label = "Add MCP Server"
 
@@ -310,7 +303,6 @@ class BLENDER_AI_OT_mcp_add(bpy.types.Operator):
 
 class BLENDER_AI_OT_mcp_remove(bpy.types.Operator):
     bl_description = "Remove the selected MCP server"
-
     bl_idname = "blender_ai.mcp_remove"
     bl_label = "Remove MCP Server"
 
@@ -357,7 +349,6 @@ class BLENDER_AI_OT_mcp_import(bpy.types.Operator):
 
 class BLENDER_AI_OT_mcp_connect(bpy.types.Operator):
     bl_description = "Connect (or reconnect) the enabled MCP servers. New tools apply to new conversations"
-
     bl_idname = "blender_ai.mcp_connect"
     bl_label = "Connect MCP Servers"
 
@@ -368,7 +359,6 @@ class BLENDER_AI_OT_mcp_connect(bpy.types.Operator):
 
 class BLENDER_AI_OT_attach_image(bpy.types.Operator):
     bl_description = "Attach a reference image to the next prompt (texture tools can use it as 'attached')"
-
     bl_idname = "blender_ai.attach_image"
     bl_label = "Attach Image"
 
@@ -388,7 +378,6 @@ class BLENDER_AI_OT_attach_image(bpy.types.Operator):
 
 class BLENDER_AI_OT_clear_attachment(bpy.types.Operator):
     bl_description = "Remove the attached image"
-
     bl_idname = "blender_ai.clear_attachment"
     bl_label = "Remove Attachment"
 
@@ -400,7 +389,6 @@ class BLENDER_AI_OT_clear_attachment(bpy.types.Operator):
 
 class BLENDER_AI_OT_send(bpy.types.Operator):
     bl_description = "Send the prompt bar text"
-
     bl_idname = "blender_ai.send"
     bl_label = "Generate"
 
@@ -411,7 +399,6 @@ class BLENDER_AI_OT_send(bpy.types.Operator):
 
 class BLENDER_AI_OT_stop(bpy.types.Operator):
     bl_description = "Stop the running request"
-
     bl_idname = "blender_ai.stop"
     bl_label = "Stop"
 
@@ -425,7 +412,6 @@ class BLENDER_AI_OT_stop(bpy.types.Operator):
 
 class BLENDER_AI_OT_new_conversation(bpy.types.Operator):
     bl_description = "Forget the conversation so far (the scene is kept)"
-
     bl_idname = "blender_ai.new_conversation"
     bl_label = "New Conversation"
 
@@ -439,7 +425,6 @@ class BLENDER_AI_OT_new_conversation(bpy.types.Operator):
 
 class BLENDER_AI_OT_clear_log(bpy.types.Operator):
     bl_description = "Clear the step log"
-
     bl_idname = "blender_ai.clear_log"
     bl_label = "Clear Log"
 
@@ -452,7 +437,6 @@ class BLENDER_AI_OT_clear_log(bpy.types.Operator):
 
 class BLENDER_AI_OT_toggle_entry(bpy.types.Operator):
     bl_description = "Show or hide details"
-
     bl_idname = "blender_ai.toggle_entry"
     bl_label = "Toggle Details"
     bl_options = {"INTERNAL"}
@@ -470,7 +454,6 @@ class BLENDER_AI_OT_toggle_entry(bpy.types.Operator):
 
 class BLENDER_AI_OT_open_settings(bpy.types.Operator):
     bl_description = "Open Blender AI in Preferences"
-
     bl_idname = "blender_ai.open_settings"
     bl_label = "All Settings…"
 

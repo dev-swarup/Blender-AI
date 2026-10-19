@@ -51,7 +51,6 @@ def open_approval_later() -> None:
 
 class BLENDER_AI_OT_approval_dialog(bpy.types.Operator):
     bl_description = "Review the Python code an AI agent wants to run"
-
     bl_idname = "blender_ai.approval_dialog"
     bl_label = "Run Python code?"
     bl_options = {"INTERNAL"}
