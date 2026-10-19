@@ -450,6 +450,26 @@ def rigify_and_walk_cycle() -> None:
 
 
 @case
+def helpers_installer_enables_and_explains() -> None:
+    from blender_ai.integrations import installer
+
+    pending = [h.name for h in installer.downloads()]
+    if pending and not bpy.app.online_access:
+        try:
+            installer.install(interactive=False)
+        except installer.InstallError as exc:
+            assert "Online access is off" in str(exc), exc
+        else:
+            raise AssertionError(f"downloading {pending} offline should fail with a clear message")
+    elif not pending:
+        installer.install(interactive=False)
+    ready = {h.id for h in integrations.HELPERS.values()} - {h.id for h in integrations.missing()}
+    installed = {h.id for h in integrations.HELPERS.values() if integrations.installed_module(h.id)}
+    assert installed <= ready, f"installed helpers must end up enabled: {installed - ready}"
+    assert "rigify" in ready
+
+
+@case
 def helper_integrations_when_present() -> None:
     fresh()
     for module in ("bl_ext.blender_org.mpfb", "bl_ext.blender_org.looptools"):
