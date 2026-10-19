@@ -26,9 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install pytest ruff numpy -r scripts/requirements-vendor.txt
       - name: Lint
-        run: ruff check blender_ai tests scripts
+        run: ruff check src tests scripts
       - name: Format
-        run: ruff format --check blender_ai tests scripts
+        run: ruff format --check src tests scripts
       - name: Unit tests
         run: pytest
 
