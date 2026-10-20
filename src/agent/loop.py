@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from ..tools import registry
@@ -88,6 +88,9 @@ class Run:
         self.session.bridge.post(self.session._on_tool_call, self, ToolCall(call_id, name, args), future)
         return self._wait(future, cancelled)
 
+    def scene(self) -> str:
+        return "" if self.cancelled else self._on_main(self.session._scene_now, self) or ""
+
     def feedback(self) -> ImagePart | None:
         if self.cancelled:
             return None
@@ -103,7 +106,7 @@ class Run:
             return ToolResult("Sub-agents can't start more sub-agents at this depth; do the work yourself.", True)
         tasks: list[dict[str, Any]] = args["tasks"]
         self.session.bridge.post(self.session._on_spawn, self, call_id, tasks)
-        workers = min(len(tasks), roles.MAX_PARALLEL)
+        workers = max(1, min(len(tasks), self.config.parallel_agents, roles.MAX_PARALLEL))
         with concurrent.futures.ThreadPoolExecutor(workers, thread_name_prefix="blender_ai-subagent") as pool:
             reports = list(pool.map(self._run_child, tasks))
         if self.cancelled:
@@ -124,10 +127,11 @@ class Run:
             return False, f"{title} (not started: the limit of sub-agents per request was reached; do it yourself)"
         tools = self.session._toolset(role, self.depth + 1)
         parent = self.role.name if not self.label else self.label
-        child = Run(self.session, self.config, tools, role.subagent_prompt(parent), role, parent=self, label=label)
+        config = replace(self.config, max_steps=0)
+        child = Run(self.session, config, tools, role.subagent_prompt(parent), role, parent=self, label=label)
         snapshot = self._on_main(self.session._child_started, child, task["task"]) or ""
         try:
-            agent = self.session.agent_factory(self.config)
+            agent = self.session.agent_factory(config)
             report = agent.run(child, UserTurn(task["task"], None, snapshot)) or "(no report)"
         except AgentError as exc:
             self.session.bridge.post(self.session._child_finished, child, str(exc), exc.kind != "paused")
@@ -463,6 +467,9 @@ class AgentSession:
             LogKind.AGENT, child.label, detail=first, status=Status.RUNNING, agent=child.parent.label if child.parent else ""
         )
         return self.host.scene_snapshot(track=False)
+
+    def _scene_now(self, run: Run) -> str:
+        return self.host.scene_snapshot(track=False) if self._active(run) else ""
 
     def _child_finished(self, child: Run, report: str, failed: bool) -> None:
         entry = self._child_entries.get(child.id)

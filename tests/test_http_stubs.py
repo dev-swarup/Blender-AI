@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -34,10 +35,19 @@ def chunk(delta: dict[str, Any], finish: str | None = None) -> str:
     return f"data: {json.dumps(payload)}\n\n"
 
 
-USAGE = (
-    'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],'
-    '"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}\n\n'
-)
+def usage(prompt: int = 11) -> str:
+    payload = {
+        "id": "c1",
+        "object": "chat.completion.chunk",
+        "created": 1,
+        "model": "m",
+        "choices": [],
+        "usage": {"prompt_tokens": prompt, "completion_tokens": 3, "total_tokens": prompt + 3},
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+USAGE = usage()
 CHAT_TOOL = (
     chunk({"role": "assistant", "content": "Making a cube. "})
     + chunk({"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "make", "arguments": ""}}]})
@@ -55,7 +65,7 @@ def sse(events: list[dict[str, Any]]) -> bytes:
     return b"".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n".encode() for e in events)
 
 
-def anthropic_message(blocks: list[dict[str, Any]], stop: str) -> bytes:
+def anthropic_message(blocks: list[dict[str, Any]], stop: str, tokens: int = 12) -> bytes:
     events: list[dict[str, Any]] = [
         {
             "type": "message_start",
@@ -67,7 +77,7 @@ def anthropic_message(blocks: list[dict[str, Any]], stop: str) -> bytes:
                 "content": [],
                 "stop_reason": None,
                 "stop_sequence": None,
-                "usage": {"input_tokens": 12, "output_tokens": 1},
+                "usage": {"input_tokens": tokens, "output_tokens": 1},
             },
         }
     ]
@@ -188,7 +198,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if Handler.route is not None:
                 time.sleep(0.3)
-                self._stream(Handler.route(body))
+                reply = Handler.route(body)
+                if isinstance(reply, tuple):
+                    self._json(reply[0], {"type": "error", "error": {"type": "invalid_request_error", "message": reply[1]}})
+                    return
+                self._stream(reply)
                 return
             self._stream(Handler.messages.pop(0))
         elif path == "/v1/images/generations":
@@ -344,7 +358,7 @@ def test_anthropic_agent_replays_thinking_and_results(server: str) -> None:
     assert assistant[0] == {"type": "thinking", "thinking": "Plan the cube.", "signature": "sig-abc"}
     results = second["messages"][2]["content"]
     assert results[0]["type"] == "tool_result" and results[0]["content"][0]["text"] == "made cube"
-    assert results[-1]["type"] == "image", "viewport screenshot after a scene change"
+    assert results[-1]["content"][-1]["type"] == "image", "the viewport screenshot rides in the last tool result, so clearing can remove it"
     assert Handler.seen[0]["headers"]["x-api-key"] == "ak-test"
 
 
@@ -398,41 +412,209 @@ def test_anthropic_follow_ups_keep_thinking_until_the_tab_changes(server: str) -
     assert "build a chair" in json.dumps(third["messages"]) and "Material Generator" in third["system"][0]["text"]
 
 
-@pytest.mark.parametrize("provider", ["OPENAI", "ANTHROPIC"])
-def test_long_conversations_are_compacted(server: str, provider: str) -> None:
-    Handler.seen.clear()
-    Handler.chat[:] = [CHAT_DONE, CHAT_DONE]
-    Handler.messages[:] = [anthropic_message([{"type": "text", "text": "Done."}], "end_turn") for _ in range(2)]
-    host = FakeHost()
-    model = "claude-opus-5-5" if provider == "ANTHROPIC" else "model-a"
-    host.cfg = AgentConfig(provider, server, "key", model, model_info=models.ModelInfo(model, context=2000))
-    session, say = conversation(host)
-    say("build a chair " + "with carved details " * 400)
-    say("now a table")
+def main_requests(provider: str) -> list[dict[str, Any]]:
     if provider == "ANTHROPIC":
-        summary_request, main = [s["body"] for s in Handler.seen if s["path"] == "/v1/messages"][1:]
-        turns = main["messages"]
-    else:
-        summary_request, main = chat_requests()[1:]
-        turns = main["messages"][1:]
-    assert "<transcript>" in json.dumps(summary_request) and "build a chair" in json.dumps(summary_request)
-    assert len(turns) == 1 and turns[0]["role"] == "user", "the old turns are replaced by the summary"
-    sent = json.dumps(turns[0])
-    assert "<conversation_summary>" in sent and "Chair exists" in sent and "now a table" in sent
+        return anthropic_requests()
+    return [b for b in chat_requests() if b.get("stream")]
+
+
+def summary_requests() -> list[dict[str, Any]]:
+    return [s["body"] for s in Handler.seen if "body" in s and not s["body"].get("stream") and "<transcript>" in json.dumps(s["body"])]
+
+
+def turns_of(provider: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+    return body["messages"] if provider == "ANTHROPIC" else body["messages"][1:]
+
+
+def sized_config(provider: str, server: str, context: int) -> AgentConfig:
+    model = "claude-opus-5-5" if provider == "ANTHROPIC" else "model-a"
+    return AgentConfig(provider, server, "key", model, model_info=models.ModelInfo(model, context=context))
+
+
+@pytest.mark.parametrize("provider", ["OPENAI", "ANTHROPIC"])
+def test_long_conversations_are_compacted_by_the_reported_count(server: str, provider: str) -> None:
+    for reported, compacted in ((2100, True), (300, False)):
+        Handler.seen.clear()
+        Handler.chat[:] = [final("Done.", reported), CHAT_DONE]
+        Handler.messages[:] = [anthropic_message([{"type": "text", "text": "Done."}], "end_turn", reported) for _ in range(2)]
+        host = FakeHost()
+        host.cfg = sized_config(provider, server, 2000)
+        session, say = conversation(host)
+        say("build a chair " + "with carved details " * 400)
+        say("now a table")
+        turns = turns_of(provider, main_requests(provider)[-1])
+        notes = [e.text for e in session.log if e.kind is LogKind.INFO]
+        if not compacted:
+            assert not summary_requests() and len(turns) == 3, "the API reported a small prompt, so nothing is compacted"
+            assert not any("Compacted" in n for n in notes)
+            continue
+        (summary_request,) = summary_requests()
+        assert "build a chair" in json.dumps(summary_request) and "now a table" not in json.dumps(summary_request)
+        assert len(turns) == 1 and turns[0]["role"] == "user", "the old turns are replaced by the summary"
+        sent = json.dumps(turns[0])
+        assert "<conversation_summary>" in sent and "Chair exists" in sent and "now a table" in sent
+        assert any("Compacted the conversation" in n for n in notes)
+        assert session.usage.turns == 3
+
+
+@pytest.mark.parametrize("provider", ["OPENAI", "ANTHROPIC"])
+def test_a_long_run_is_compacted_between_steps(server: str, provider: str) -> None:
+    Handler.seen.clear()
+    Handler.chat[:] = [tool_calls(("c1", "make", {"name": "Chair.Seat"}), prompt=4000), final("Chair done."), final("Table done.")]
+    Handler.messages[:] = [
+        anthropic_message([{"type": "tool_use", "id": "t1", "name": "make", "input": {"name": "Chair.Seat"}}], "tool_use", 4000),
+        anthropic_message([{"type": "text", "text": "Chair done."}], "end_turn"),
+        anthropic_message([{"type": "text", "text": "Table done."}], "end_turn"),
+    ]
+    host = FakeHost()
+    host.cfg = sized_config(provider, server, 4000)
+    session, say = conversation(host)
+    say("build a chair with " + "carved details " * 280)
+    say("now a table")
+    assert host.executed == ["make"]
+    (summary_request,) = summary_requests()
+    assert "[tool call] make" in json.dumps(summary_request) and "made Chair.Seat" in json.dumps(summary_request)
+    _first, resumed, follow_up = main_requests(provider)
+    lead, *rest = turns_of(provider, resumed)
+    sent = json.dumps(lead)
+    assert "<conversation_summary>" in sent and "Chair exists" in sent and "build a chair with carved" in sent
+    assert "Scene: empty" in sent and "Carry on" in sent, "the fresh scene summary and the request in progress come back after compacting"
+    assert all(t["role"] == "user" for t in rest) and "tool" not in json.dumps([t.get("role") for t in rest]), "no tool round is replayed"
+    assert turns_of(provider, follow_up)[0] == lead and "now a table" in json.dumps(turns_of(provider, follow_up)[-1])
+    assert [e.text for e in session.log if e.kind is LogKind.ASSISTANT] == ["Chair done.", "Table done."]
     assert any("Compacted the conversation" in e.text for e in session.log if e.kind is LogKind.INFO)
-    assert session.usage.turns == 3
 
 
-def tool_calls(*calls: tuple[str, str, dict[str, Any]]) -> str:
+def answered(provider: str, body: dict[str, Any]) -> int:
+    if provider == "ANTHROPIC":
+        return sum(1 for m in body["messages"] if isinstance(m["content"], list) for b in m["content"] if b.get("type") == "tool_result")
+    return sum(1 for m in body["messages"] if m["role"] == "tool")
+
+
+PART = "Part{n}." + "x" * 3200
+
+
+@pytest.mark.parametrize("provider", ["OPENAI", "ANTHROPIC"])
+def test_a_zero_step_limit_means_no_limit(server: str, provider: str) -> None:
+    def route(body: dict[str, Any]) -> Any:
+        n = answered(provider, body)
+        if provider == "ANTHROPIC":
+            if n < 12:
+                return anthropic_message([{"type": "tool_use", "id": f"t{n}", "name": "make", "input": {"name": f"P{n}"}}], "tool_use")
+            return anthropic_message([{"type": "text", "text": "Twelve made."}], "end_turn")
+        return tool_calls((f"c{n}", "make", {"name": f"P{n}"})) if n < 12 else final("Twelve made.")
+
+    Handler.route = route
+    try:
+        for steps, finished in ((0, True), (5, False)):
+            host = FakeHost()
+            host.cfg = AgentConfig(provider, server, "key", "claude-opus-5-5" if provider == "ANTHROPIC" else "model-a", max_steps=steps)
+            session = run_session(host, "make twelve")
+            texts = [e.text for e in session.log if e.kind is LogKind.ASSISTANT]
+            if finished:
+                assert len(host.executed) == 12 and texts[-1] == "Twelve made.", "sub-agents run with no step limit"
+            else:
+                assert len(host.executed) < 12 and any("Paused after 5 steps" in e.text for e in session.log)
+    finally:
+        Handler.route = None
+
+
+@pytest.mark.parametrize("provider", ["OPENAI", "ANTHROPIC"])
+def test_old_tool_results_are_cleared_in_batches(server: str, provider: str) -> None:
+    Handler.seen.clear()
+
+    def route(body: dict[str, Any]) -> Any:
+        n = answered(provider, body)
+        if provider == "ANTHROPIC":
+            if n < 9:
+                return anthropic_message([{"type": "tool_use", "id": f"t{n}", "name": "make", "input": {"name": PART.format(n=n)}}], "tool_use", 10_000)
+            return anthropic_message([{"type": "text", "text": "All parts built."}], "end_turn")
+        return tool_calls((f"c{n}", "make", {"name": PART.format(n=n)}), prompt=10_000) if n < 9 else final("All parts built.")
+
+    Handler.route = route
+    try:
+        host = FakeHost()
+        host.cfg = sized_config(provider, server, 20_000)
+        host.feedback = False
+        session = run_session(host, "build nine parts")
+    finally:
+        Handler.route = None
+    assert len(host.executed) == 9 and not summary_requests()
+    bodies = main_requests(provider)
+    cleared = [json.dumps(b).count("Old tool result cleared") for b in bodies]
+    assert cleared == [0, 0, 0, 0, 0, 0, 2, 2, 4, 4], "two old results go at once, then nothing until two more are worth clearing"
+    first_clear = json.dumps(bodies[6])
+    assert "more characters cleared from history" in first_clear and PART.format(n=1) not in first_clear
+    assert all(PART.format(n=n) in first_clear for n in range(2, 6)), "the latest results stay whole"
+    before, after = turns_of(provider, bodies[6]), turns_of(provider, bodies[7])
+    if provider == "OPENAI":
+        before = before[:-1]
+    assert after[: len(before)] == before, "between batches the history only grows, so the cached prefix holds"
+    assert [e.text for e in session.log if e.kind is LogKind.ASSISTANT][-1] == "All parts built."
+
+
+def test_anthropic_strips_thinking_the_api_rejects_after_clearing(server: str) -> None:
+    Handler.seen.clear()
+    rejected: list[int] = []
+
+    def signature(messages: list[dict[str, Any]]) -> str:
+        return hashlib.sha256(json.dumps(messages, sort_keys=True).encode()).hexdigest()[:16]
+
+    def route(body: dict[str, Any]) -> Any:
+        messages = body["messages"]
+        for i, m in enumerate(messages):
+            for b in m["content"] if m["role"] == "assistant" else []:
+                if b.get("type") == "thinking" and b["signature"] != signature(messages[:i]):
+                    rejected.append(i)
+                    return 400, f"messages.{i}.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation."
+        n = answered("ANTHROPIC", body)
+        thought = {"type": "thinking", "thinking": f"Step {n}.", "signature": signature(messages)}
+        if n < 11:
+            return anthropic_message([thought, {"type": "tool_use", "id": f"t{n}", "name": "make", "input": {"name": PART.format(n=n)}}], "tool_use", 10_000)
+        return anthropic_message([thought, {"type": "text", "text": "All parts built."}], "end_turn")
+
+    Handler.route = route
+    try:
+        host = FakeHost()
+        host.cfg = sized_config("ANTHROPIC", server, 20_000)
+        host.feedback = False
+        session = run_session(host, "build eleven parts")
+    finally:
+        Handler.route = None
+    assert len(rejected) == 1, "one rejection, then the agent strips thinking after each clearing point itself"
+    assert len(host.executed) == 11 and [e.text for e in session.log if e.kind is LogKind.ASSISTANT][-1] == "All parts built."
+    last = anthropic_requests()[-1]["messages"]
+    assert any(b.get("type") == "thinking" for m in last if m["role"] == "assistant" for b in m["content"]), "thinking after the last clear is kept"
+
+
+def test_official_anthropic_requests_clear_old_results_server_side() -> None:
+    from blender_ai.agent import anthropic_agent, history
+    from blender_ai.agent.roles import SPAWN_SPEC
+
+    tools = [SPAWN_SPEC]
+    official = AgentConfig(
+        "ANTHROPIC", "https://api.anthropic.com", "key", "claude-opus-5-5", model_info=models.ModelInfo("claude-opus-5-5", context=1_000_000)
+    )
+    params = anthropic_agent.build_request(official, system="s", tools=tools, messages=[])
+    (edit,) = params["context_management"]["edits"]
+    assert edit["type"] == "clear_tool_uses_20250919" and edit["keep"] == {"type": "tool_uses", "value": history.CLEAR_KEEP}
+    assert edit["trigger"]["value"] == history.CLEAR_TRIGGER and edit["clear_at_least"]["value"] == history.clear_at_least(1_000_000)
+    assert edit["exclude_tools"] == ["spawn_agents"] and edit["clear_tool_inputs"] is True
+    assert anthropic_agent.CONTEXT_BETA in params["betas"]
+    proxy = AgentConfig("ANTHROPIC", "http://127.0.0.1:9/v1", "key", "claude-opus-5-5")
+    assert "context_management" not in anthropic_agent.build_request(proxy, system="s", tools=tools, messages=[]), "other endpoints clear on the client"
+
+
+def tool_calls(*calls: tuple[str, str, dict[str, Any]], prompt: int = 11) -> str:
     out = ""
     for i, (call_id, name, args) in enumerate(calls):
         out += chunk({"tool_calls": [{"index": i, "id": call_id, "type": "function", "function": {"name": name, "arguments": ""}}]})
         out += chunk({"tool_calls": [{"index": i, "function": {"arguments": json.dumps(args)}}]})
-    return out + chunk({}, "tool_calls") + USAGE + DONE
+    return out + chunk({}, "tool_calls") + usage(prompt) + DONE
 
 
-def final(text: str) -> str:
-    return chunk({"role": "assistant", "content": text}) + chunk({}, "stop") + USAGE + DONE
+def final(text: str, prompt: int = 11) -> str:
+    return chunk({"role": "assistant", "content": text}) + chunk({}, "stop") + usage(prompt) + DONE
 
 
 def test_openai_agent_spawns_parallel_subagents(server: str) -> None:

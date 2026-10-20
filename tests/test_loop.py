@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -370,7 +371,7 @@ class RoutedAgent:
         return f"built {turn.text}"
 
 
-def routed_session(scripts: dict[str, list[Any]]) -> tuple[AgentSession, list[tuple[str, int]], Bridge, list[Any]]:
+def routed_session(scripts: dict[str, list[Any]], host: FakeHost | None = None) -> tuple[AgentSession, list[tuple[str, int]], Bridge, list[Any]]:
     log: list[tuple[str, int]] = []
     agents: list[RoutedAgent] = []
 
@@ -379,7 +380,7 @@ def routed_session(scripts: dict[str, list[Any]]) -> tuple[AgentSession, list[tu
         return agents[-1]
 
     bridge = Bridge()
-    session = AgentSession(FakeHost(), bridge, agent_factory=factory, catalog=catalog())
+    session = AgentSession(host or FakeHost(), bridge, agent_factory=factory, catalog=catalog())
     return session, log, bridge, agents
 
 
@@ -411,6 +412,47 @@ def test_spawned_subagents_run_in_parallel_and_report_back() -> None:
     assert all(e.status is Status.OK for e in tool_rows)
     spawn_row = next(e for e in session.log if e.tool == roles.SPAWN_TOOL)
     assert spawn_row.status is Status.OK and spawn_row.detail == "2 in parallel: House, Well" and spawn_row.result == "2 of 2 finished"
+
+
+def test_the_setting_caps_how_many_subagents_run_at_once() -> None:
+    assert AgentConfig("OPENAI", "", "", "m").parallel_agents == roles.DEFAULT_PARALLEL == 8
+    assert roles.SPAWN_SPEC.input_schema["properties"]["tasks"]["maxItems"] == roles.MAX_TASKS_PER_CALL >= roles.MAX_PARALLEL
+
+    def peak(limit: int, count: int) -> int:
+        lock = threading.Lock()
+        running = [0, 0]
+
+        def work(run: Any) -> None:
+            with lock:
+                running[0] += 1
+                running[1] = max(running[1], running[0])
+            time.sleep(0.15)
+            with lock:
+                running[0] -= 1
+
+        host = FakeHost()
+        host.cfg = AgentConfig("OPENAI", "https://api.example.com/v1", "key", "model-a", parallel_agents=limit)
+        tasks = [("model_builder", "part", f"Part{n}") for n in range(count)]
+        session, log, bridge, _agents = routed_session({"go": [spawn("s1", *tasks)], "part": [work]}, host)
+        session.submit("go")
+        pump(bridge, lambda: not session.busy, timeout=20)
+        assert len(log) == count + 1
+        return running[1]
+
+    assert peak(8, 10) == 8, "eight at once by default; the rest start as others finish"
+    assert peak(3, 6) == 3
+
+
+def test_subagents_have_no_step_limit() -> None:
+    seen: list[int] = []
+    host = FakeHost()
+    host.cfg = AgentConfig("OPENAI", "https://api.example.com/v1", "key", "model-a", max_steps=60)
+    session, _log, bridge, _agents = routed_session(
+        {"go": [spawn("s1", ("model_builder", "part", "Part"))], "part": [lambda run: seen.append(run.config.max_steps)]}, host
+    )
+    session.submit("go")
+    pump(bridge, lambda: not session.busy)
+    assert seen == [0] and session.host.agent_config().max_steps == 60, "sub-agents run until done; the main agent keeps the setting"
 
 
 def test_subagents_nest_up_to_the_depth_limit() -> None:

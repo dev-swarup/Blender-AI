@@ -59,7 +59,7 @@ Each tab is an agent with its own system prompt and toolset. All of them share o
 - **approval**: the user is asked first when *Ask before running Python* is on.
 - **asks the user**: the run pauses until the user answers.
 - **sub-agents**: starts specialist agents that work concurrently in the same scene.
-- Sub-agents nest up to 2 levels, run 4 at a time and are capped at 16 per request. They do not receive `ask_user` or `undo`.
+- Sub-agents nest up to 2 levels, run 8 at a time by default (up to 16 in settings) and are capped at 32 per request. They do not receive `ask_user` or `undo`.
 - Tools from connected MCP servers are named `<server>_<tool>` and are added to every agent. They are not listed here.
 
 ## Meta
@@ -117,7 +117,7 @@ Undo the last steps (each tool call is one step). Use to back out of a change th
 
 *sub-agents*
 
-Start specialist sub-agents for self-contained parts of the job. All tasks in one call run at the same time, each with a fresh context and its own tools, in the same Blender scene; the call returns when they are all done, with each agent's report. Roles: model_builder (models and game-map pieces), scene_builder (layout, lighting, camera, environments), animator (rigs, keyframes, cameras, physics), material_generator (materials and textures). A sub-agent knows nothing about this conversation: brief each task completely (what, real size, location, the collection to build in, style, what not to touch).
+Start specialist sub-agents for self-contained parts of the job. They work in parallel in the same Blender scene, as many at once as the user's settings allow (the rest start as others finish), each with a fresh context and its role's tools, and the call returns when all of them have finished, with each agent's report. Roles: model_builder (models, sub-assemblies, level pieces), scene_builder (layout, lighting, camera, environments), animator (rigs, keyframes, camera moves, physics), material_generator (materials and textures). Sub-agents can't undo or ask the user questions. Up to 16 tasks per call and 32 sub-agents per user request. A sub-agent knows nothing about this conversation, so brief each task completely: what to make, real size, location, the collection to build in, style, and what not to touch.
 
 | Parameter | Type | Required | Description |
 |---|---|:---:|---|

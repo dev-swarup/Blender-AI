@@ -127,7 +127,21 @@ class BlenderAIPreferences(AddonPreferences):
         default=True,
     )
     screenshot_size: IntProperty(name="Screenshot width", default=768, min=256, max=1568)
-    max_steps: IntProperty(name="Max steps", description="Model turns per request before it pauses", default=60, min=1, max=500)
+    max_steps: IntProperty(
+        name="Max steps",
+        description="Model turns per request before the main agent pauses; 0 means no limit. Sub-agents have no step limit",
+        default=0,
+        min=0,
+        max=1000,
+    )
+    parallel_agents: IntProperty(
+        name="Sub-agents at once",
+        description="How many sub-agents can work at the same time. More finishes big builds sooner but sends more requests at once, "
+        "which free or rate-limited API plans may refuse",
+        default=8,
+        min=1,
+        max=16,
+    )
     use_fallbacks: BoolProperty(
         name="Refusal fallback (api.anthropic.com)",
         description="If a safety classifier declines a request, let the API retry it on a fallback model",
@@ -199,6 +213,7 @@ class BlenderAIPreferences(AddonPreferences):
             model=self.model(),
             reasoning=self.reasoning,
             max_steps=self.max_steps,
+            parallel_agents=self.parallel_agents,
             model_info=info,
             send_images=self.auto_screenshot,
             use_fallbacks=self.use_fallbacks,
@@ -315,7 +330,9 @@ class BlenderAIPreferences(AddonPreferences):
         sub = row.row()
         sub.enabled = self.auto_screenshot
         sub.prop(self, "screenshot_size")
-        col.prop(self, "max_steps")
+        row = col.row()
+        row.prop(self, "max_steps")
+        row.prop(self, "parallel_agents")
         if self.is_anthropic:
             col.prop(self, "use_fallbacks")
         col.prop(self, "cache_dir")

@@ -153,7 +153,7 @@ def main() -> None:
         "- **approval**: the user is asked first when *Ask before running Python* is on.",
         "- **asks the user**: the run pauses until the user answers.",
         "- **sub-agents**: starts specialist agents that work concurrently in the same scene.",
-        f"- Sub-agents nest up to {roles.MAX_DEPTH} levels, run {roles.MAX_PARALLEL} at a time and are capped at {roles.MAX_SUBAGENTS_PER_REQUEST} per request. They do not receive "
+        f"- Sub-agents nest up to {roles.MAX_DEPTH} levels, run {roles.DEFAULT_PARALLEL} at a time by default (up to {roles.MAX_PARALLEL} in settings) and are capped at {roles.MAX_SUBAGENTS_PER_REQUEST} per request. They do not receive "
         + " or ".join(f"`{n}`" for n in sorted(roles.SUBAGENT_EXCLUDED))
         + ".",
         "- Tools from connected MCP servers are named `<server>_<tool>` and are added to every agent. They are not listed here.",

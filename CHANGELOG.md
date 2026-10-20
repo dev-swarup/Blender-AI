@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file. The format foll
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-20
+
+### Added
+
+- Long builds keep their requests small: old tool results and scripts are cleared from the conversation
+  in cache-friendly batches, and compaction also runs between tool steps.
+- A **Sub-agents at once** setting (default 8, up to 16).
+
+### Changed
+
+- Compaction starts at 90% of the context window, measured with the API's token count.
+- No step limit by default: **Max steps** is 0 (no limit) instead of 60 and applies to the main agent
+  only. Sub-agents always run until their task is done.
+- Sub-agents: eight at once instead of four, up to 16 tasks per call and 32 per request. Model Builder
+  hands big models to sub-agents, one per sub-assembly.
+- Clearer agent instructions: each specialist states its quality bar, rules say why they exist, and
+  scripts stay inside the scene.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added
@@ -130,5 +148,6 @@ All notable changes to this project are documented in this file. The format foll
 - Packaging as per-platform zips for Windows, macOS (Apple silicon and Intel) and Linux, for Blender 4.2
   LTS and later.
 
+[0.5.0]: https://github.com/dev-swarup/Blender-AI/releases/tag/v0.5.0
 [0.4.0]: https://github.com/dev-swarup/Blender-AI/releases/tag/v0.4.0
 [0.3.0]: https://github.com/dev-swarup/Blender-AI/releases/tag/v0.3.0

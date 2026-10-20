@@ -121,10 +121,38 @@ def _close_open_calls(items: list[Any]) -> list[Any]:
 @dataclass
 class _RunState:
     images_ok: bool
+    tokens: int | None = None
+    counted: int = 0
+    fixed: int = 0
     turn: int = 0
     tools_called: int = 0
     pending_images: list[ImagePart] = field(default_factory=list)
     order: asyncio.Lock = field(default_factory=asyncio.Lock)
+    cleared: set[str] = field(default_factory=set)
+    cut: str | None = None
+    lead: dict[str, Any] | None = None
+    usage: Any = None
+    entries: int = 0
+    sent: int = 0
+    compact_failed: bool = False
+
+    def view(self, items: list[Any]) -> list[Any]:
+        if self.cut is not None and self.lead is not None:
+            at = next(
+                (i for i, it in enumerate(items) if isinstance(it, dict) and it.get("type") == "function_call_output" and it.get("call_id") == self.cut), None
+            )
+            if at is not None:
+                items = [self.lead, *items[at + 1 :]]
+        return history.clear(items, self.cleared) if self.cleared else items
+
+    def size(self, items: list[Any]) -> int:
+        entries = getattr(self.usage, "request_usage_entries", None) or []
+        if len(entries) > self.entries:
+            self.entries = len(entries)
+            self.tokens, self.counted = (entries[-1].input_tokens + entries[-1].output_tokens) or None, self.sent
+        if self.tokens is None:
+            return self.fixed + history.estimate_tokens(items)
+        return self.tokens + history.fresh_tokens(items[self.counted :])
 
 
 class OpenAIAgent:
@@ -141,6 +169,8 @@ class OpenAIAgent:
         self.no_images: set[str] = set()
         self.no_usage: set[str] = set()
         self._lock = threading.Lock()
+        self._tokens: int | None = None
+        self._counted = 0
 
     @property
     def has_history(self) -> bool:
@@ -149,6 +179,7 @@ class OpenAIAgent:
     def reset(self) -> None:
         with self._lock:
             self.history = []
+            self._tokens = None
 
     def run(self, run: Any, turn: UserTurn) -> str:
         with self._lock:
@@ -167,10 +198,15 @@ class OpenAIAgent:
     async def _run(self, run: Any, turn: UserTurn) -> str:
         cfg: AgentConfig = run.config
         lead = ""
-        if history.needs_compaction(self.history, cfg.context_window) and (summary := await self._compact(run, cfg)):
+        fixed = history.fixed_tokens(run.system, run.tools)
+        tokens = (fixed + history.estimate_tokens(self.history)) if self._tokens is None else self._tokens + history.fresh_tokens(self.history[self._counted :])
+        tokens += history.estimate_tokens([turn.text, turn.snapshot])
+        if history.needs_compaction(self.history, cfg.context_window, tokens) and (summary := await self._summarize(self.history, run, cfg)):
+            self.history, self._tokens = [], None
             lead = history.summary_turn(summary)
+            run.emit(AgentEvent("info", text=history.COMPACTED))
         for _attempt in range(4):
-            state = _RunState(images_ok=cfg.vision and cfg.model not in self.no_images)
+            state = _RunState(images_ok=cfg.vision and cfg.model not in self.no_images, tokens=self._tokens, counted=self._counted, fixed=fixed)
             before = list(self.history)
             try:
                 return await self._attempt(run, turn, state, lead)
@@ -193,14 +229,14 @@ class OpenAIAgent:
                     self.no_usage.add(cfg.model)
                 else:
                     raise error from exc
-                self.history = before
+                self.history, self._tokens = before, None
         raise AgentError("The request kept failing; check the model and API URL.", "api")
 
-    async def _compact(self, run: Any, cfg: AgentConfig) -> str:
+    async def _summarize(self, items: list[Any], run: Any, cfg: AgentConfig) -> str:
         from openai import AsyncOpenAI
 
         client = AsyncOpenAI(base_url=api_root(cfg.base_url), api_key=cfg.api_key or "not-needed", max_retries=2, timeout=600.0)
-        request = [{"role": "system", "content": history.SUMMARY_SYSTEM}, {"role": "user", "content": history.summary_prompt(self.history, cfg.context_window)}]
+        request = [{"role": "system", "content": history.SUMMARY_SYSTEM}, {"role": "user", "content": history.summary_prompt(items, cfg.context_window)}]
         try:
             reply = await client.chat.completions.create(model=cfg.model, messages=request)
         except Exception as exc:
@@ -208,11 +244,31 @@ class OpenAIAgent:
             return ""
         if reply.usage is not None:
             run.emit(AgentEvent("usage", usage={"input_tokens": reply.usage.prompt_tokens, "output_tokens": reply.usage.completion_tokens}))
-        summary = (reply.choices[0].message.content or "").strip() if reply.choices else ""
-        if summary:
-            self.history = []
-            run.emit(AgentEvent("info", text=history.COMPACTED))
-        return summary
+        return (reply.choices[0].message.content or "").strip() if reply.choices else ""
+
+    async def _tidy(self, items: list[Any], run: Any, cfg: AgentConfig, turn: UserTurn, state: _RunState) -> list[Any]:
+        window = cfg.context_window
+        tokens = state.size(items)
+        if tokens > history.clear_trigger(window) and (ids := history.plan_clear(items, window)):
+            before, items = items, history.clear(items, ids)
+            state.cleared |= ids
+            tokens -= history.estimate_tokens(before) - history.estimate_tokens(items)
+            if state.tokens is not None:
+                state.tokens, state.counted = tokens, len(items)
+        last = items[-1] if items else None
+        working = state.tools_called > 0 and isinstance(last, dict) and last.get("type") == "function_call_output"
+        if working and not state.compact_failed and history.needs_compaction(items, window, tokens):
+            if summary := await self._summarize(items, run, cfg):
+                scene = await asyncio.get_running_loop().run_in_executor(None, run.scene)
+                parts = [history.summary_turn(summary), history.resume_turn(turn.text, scene)]
+                state.lead = {"role": "user", "content": [{"type": "input_text", "text": text} for text in parts]}
+                state.cut, state.tokens = last["call_id"], None
+                items = [state.lead]
+                run.emit(AgentEvent("info", text=history.COMPACTED))
+            else:
+                state.compact_failed = True
+        state.sent = len(items)
+        return items
 
     def _close(self, note: str) -> None:
         last = self.history[-1] if self.history else None
@@ -251,23 +307,25 @@ class OpenAIAgent:
         items = [*self.history, {"role": "user", "content": content}]
         loop = asyncio.get_running_loop()
 
-        async def add_images(data: Any) -> Any:
+        async def prepare(data: Any) -> Any:
             model_input = data.model_data
+            sent = await self._tidy(state.view(list(model_input.input)), run, cfg, turn, state)
             images = list(state.pending_images)
             state.pending_images.clear()
             if state.images_ok and state.tools_called:
                 shot = await loop.run_in_executor(None, run.feedback)
                 if shot is not None:
                     images.append(shot)
-            if not images or not state.images_ok:
-                return model_input
-            parts: list[dict[str, Any]] = [{"type": "input_text", "text": "Images from your last tool calls; the last one is the viewport now:"}]
-            parts += [{"type": "input_image", "image_url": data_url(img), "detail": "auto"} for img in images]
-            return ModelInputData(input=[*model_input.input, {"role": "user", "content": parts}], instructions=model_input.instructions)
+            if images and state.images_ok:
+                parts: list[dict[str, Any]] = [{"type": "input_text", "text": "Images from your last tool calls; the last one is the viewport now:"}]
+                parts += [{"type": "input_image", "image_url": data_url(img), "detail": "auto"} for img in images]
+                sent = [*sent, {"role": "user", "content": parts}]
+            return ModelInputData(input=sent, instructions=model_input.instructions)
 
         result = Runner.run_streamed(
-            agent, input=items, max_turns=cfg.max_steps, run_config=RunConfig(tracing_disabled=True, call_model_input_filter=add_images)
+            agent, input=items, max_turns=cfg.max_steps or None, run_config=RunConfig(tracing_disabled=True, call_model_input_filter=prepare)
         )
+        state.usage = result.context_wrapper.usage
         paused = False
         try:
             async for event in result.stream_events():
@@ -279,9 +337,11 @@ class OpenAIAgent:
             paused = True
         finally:
             try:
-                self.history = _close_open_calls(result.to_input_list())
+                self.history = _close_open_calls(state.view(result.to_input_list()))
             except Exception:
                 self.history = items
+            state.size(self.history)
+            self._tokens, self._counted = state.tokens if state.entries else None, len(self.history)
             usage = getattr(result.context_wrapper, "usage", None)
             if usage is not None and (usage.input_tokens or usage.output_tokens):
                 details = getattr(usage, "input_tokens_details", None)

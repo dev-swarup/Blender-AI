@@ -1,6 +1,6 @@
 [project]
 name = "blender-ai"
-version = "0.4.0"
+version = "0.5.0"
 description = "Blender AI: a prompt bar in the 3D Viewport that models, textures, rigs and animates through typed tools"
 license = "GPL-3.0-or-later"
 requires-python = ">=3.11"

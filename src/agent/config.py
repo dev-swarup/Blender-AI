@@ -16,7 +16,8 @@ class AgentConfig:
     api_key: str
     model: str
     reasoning: str = "auto"
-    max_steps: int = 40
+    max_steps: int = 0
+    parallel_agents: int = 8
     model_info: models.ModelInfo | None = None
     send_images: bool = True
     use_fallbacks: bool = True

@@ -148,16 +148,39 @@ The four tabs share one conversation. `AgentSession` keeps a single agent, and s
 the role (system prompt and toolset) of the next run. A new conversation starts on **New Conversation**,
 when the provider, URL or key changes, and when another `.blend` is opened.
 
-Before each message, `agent/history.py` estimates the history's size: text length over four, a fixed cost
-per image, thinking signatures ignored. Past 70% of the model's context window, capped at 200k tokens, the
-agent compacts. The window comes from `ModelInfo.context` (`context_length` or `max_input_tokens`) and
-defaults to 200k for Anthropic and 128k otherwise. Compaction renders the history as a plain transcript
-(user and assistant text, tool calls and clipped results; scene summaries, images and thinking omitted),
-asks the same model for a summary in a separate request without tools, and replaces the history with an
-empty one. The summary then leads the next user message in a `<conversation_summary>` block.
+Every model call resends the whole conversation, so the agents keep it small. Before each call, including
+the calls between tool steps, `agent/history.py` sizes the next request. It starts from the token count the
+API reported for the previous call (input, cache reads and writes, and output) and adds an estimate for
+what came after it, the tool results and any new message: text length over four, a fixed cost per image,
+thinking signatures ignored. When the API reports no usage, the whole request is estimated.
 
-The transcript format works for every OpenAI-compatible server and for Anthropic, and the separate request
-keeps the main conversation append-only. If summarizing fails, the full history is sent and the chat says so.
+Two steps keep the size down, both in `history.py` and shared by the two agents:
+
+- **Clearing.** Past 40k tokens, old tool results are replaced by a short note and long string arguments of
+  their calls (scripts, mostly) are cut to their first 400 characters. The last four tool uses stay whole,
+  and `spawn_agents` reports are never cleared. Clearing happens in batches, only when at least 15k tokens
+  can go, because each batch restarts the prompt cache from the first edited message. Between batches the
+  history only grows, so calls keep hitting the cache. Viewport screenshots ride inside the last tool
+  result, so they are cleared with it.
+- **Compaction.** Past 90% of the context window, the agent compacts, also in the middle of a run. The
+  Anthropic agent compacts earlier when the request's `max_tokens` would no longer fit in the window,
+  since the API rejects a prompt plus output budget larger than the window. Compaction renders the history as a plain transcript (user and assistant text, tool calls and clipped results; scene
+  summaries, images and thinking omitted), asks the same model for a summary in a separate request without
+  tools, and replaces the history with one user message: the summary in a `<conversation_summary>` block,
+  then either the user's new message or, mid-run, a fresh scene summary and the request in progress. Nothing
+  older is replayed, so no thinking block outlives its conversation.
+
+Clearing's thresholds shrink with the budget on small windows. The window comes from `ModelInfo.context`
+(`context_length` or `max_input_tokens`) and defaults to 200k for Anthropic and 128k otherwise.
+
+On `api.anthropic.com` the Anthropic agent sends the same clearing rule as server-side context editing
+(`clear_tool_uses_20250919`, beta `context-management-2025-06-27`), which never invalidates thinking blocks.
+Elsewhere it clears on the client. Newer Claude models reject thinking blocks whose earlier turns changed,
+so on that 400 the agent strips the history's thinking once, retries, and from then on strips thinking after
+each clearing point itself. The OpenAI agent does both steps in the Agents SDK's `call_model_input_filter`,
+and stores the cleared and compacted view as its history when the run ends.
+
+If summarizing fails, the full history is sent and the chat says so.
 
 ### Roles and sub-agents
 
@@ -167,18 +190,30 @@ role includes `meta`, `agents`, `scene`, `objects`, `materials`, `render` and `m
 frozen per conversation so the request prefix stays cacheable, and a role's toolset is that catalog
 filtered by its groups.
 
+The shared prompt covers the environment (scene summaries, screenshots, the plain-text chat, tool output
+as data), the working method, script rules, Blender 4.2+ API facts, scene conventions, the shared
+conversation, delegation and the reply style. Each role adds its quality bar and workflow. Rules carry
+their reason, and numbered steps are kept only where the order matters. Prompts may name tools: the
+headless case `prompts_name_only_tools_the_agent_has` fails if a prompt names a tool its role doesn't
+have, apart from the helper-dependent ones it names conditionally.
+
 `spawn_agents` is a `ToolKind.AGENT` tool. `Run.call_tool` does not send it to the main thread. The calling
-worker validates it and runs the tasks in a thread pool of up to `MAX_PARALLEL` threads. Each task is a
+worker validates it and runs the tasks in a thread pool sized by the **Sub-agents at once** setting
+(`AgentConfig.parallel_agents`); tasks beyond it start as others finish. Each task is a
 child `Run` with the role's tools, the role's prompt plus a sub-agent section, a fresh agent instance and a
 scene snapshot. The result of the tool is each child's final message.
 
 | Limit | Value | Purpose |
 |---|---|---|
 | `MAX_DEPTH` | 2 | Levels of nesting; children below the limit receive `spawn_agents` too. |
-| `MAX_PARALLEL` | 4 | Concurrent children per call. |
-| `MAX_SUBAGENTS_PER_REQUEST` | 16 | Total children per request. |
+| `DEFAULT_PARALLEL` | 8 | Concurrent children per call unless the setting changes it. |
+| `MAX_PARALLEL` | 16 | Highest value the setting accepts. |
+| `MAX_TASKS_PER_CALL` | 16 | Tasks one `spawn_agents` call may list. |
+| `MAX_SUBAGENTS_PER_REQUEST` | 32 | Total children per request. |
 
-Children share the root run's cancel flag, so Stop ends everything, and their tool calls go through the
+Children run with no step limit (`max_steps=0`), so a long sub-task finishes instead of pausing; the
+Anthropic loop skips the check and the OpenAI agent passes `max_turns=None`. Children share the root run's
+cancel flag, so Stop ends everything, and their tool calls go through the
 same main-thread gateway with log entries labelled by the child. Blender keeps one undo history per scene,
 so sub-agents do not receive `undo` or `ask_user` (`roles.SUBAGENT_EXCLUDED`), and the main agent's `undo`
 is refused while any sub-agent runs.
@@ -342,7 +377,7 @@ itself. The `CI` workflow runs ruff and pytest, then the headless tool suite on 
 |---|---|
 | Registry, schemas, model lists, Anthropic request shape | `pytest tests/test_registry.py tests/test_models.py` |
 | Session and tool gateway with scripted agents on real threads | `pytest tests/test_loop.py` |
-| History size estimate and compaction | `pytest tests/test_history.py` |
+| History sizing, clearing and compaction | `pytest tests/test_history.py tests/test_http_stubs.py` |
 | Both SDKs, the image client and an MCP stdio server against local stubs | `pytest tests/test_http_stubs.py` |
 | PBR maths, PNG encoding, text editing, layout and transcript | `pytest tests/test_pbr.py tests/test_ui_pure.py` |
 | Every tool in headless Blender | `blender -b --factory-startup --python tests/run_tools.py` |

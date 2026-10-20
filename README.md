@@ -47,7 +47,8 @@ step logs show scripted replies rather than live model output.
 - **Four specialist agents.** Model Builder, Scene Builder, Animator and Material Generator, each with
   its own instructions and tools, sharing one conversation.
 - **Follow-ups keep their context.** Build something, then ask for a change ("taller legs", "make it oak")
-  in any tab. Long conversations are summarized automatically when they near the model's context window.
+  in any tab. Old tool results are cleared and long conversations summarized automatically, also in the
+  middle of a long build, so each request stays small.
 - **Parallel sub-agents.** An agent can hand independent parts of a job to other specialists that work
   at the same time, for example one Model Builder per house in a village.
 - **Native-looking UI.** Tabs, a chat and a multi-line prompt in one bar, model, reasoning and image-model
@@ -164,9 +165,11 @@ Every step is one undo step.
 Keep talking in the same conversation: after a build, ask for changes ("make the legs taller", "now a
 matching table") and the agent edits what it made. The four tabs share the conversation, so you can
 build in **3D Model** and texture in **Material** without repeating yourself. Each message also carries a
-fresh scene summary, so the agent notices what you changed by hand. When the conversation nears the
-model's context window, earlier turns are summarized automatically and the chat says so. **New
-Conversation** in the sidebar starts over.
+fresh scene summary, so the agent notices what you changed by hand. Every request resends the
+conversation, so the agents keep it short: old tool results are cleared as a build goes on, and at 90%
+of the model's context window earlier turns are summarized automatically, even mid-build, and the chat
+says so. Big models go faster when the agent hands parts to sub-agents, which work in their own
+context. **New Conversation** in the sidebar starts over.
 
 ![A request in progress](docs/screenshots/bar_running.png)
 
@@ -209,8 +212,10 @@ in and a fresh context, and they work concurrently in the same scene. Their step
 prefixed with the task name (`House › create_primitive`), and the parent agent checks and assembles the
 results. Stop (Esc) stops all of them.
 
-Limits: four sub-agents at once, two levels deep, 16 per request. While sub-agents run, the AI cannot use
-undo, since it would revert everyone's steps; your own Ctrl+Z still works.
+Limits: eight sub-agents at once by default (set **Sub-agents at once** up to 16 in preferences), up to
+16 tasks per call, two levels deep and 32 per request. Each running sub-agent sends its own requests, so
+lower the setting if a free or rate-limited plan starts refusing them. While sub-agents run, the AI cannot
+use undo, since it would revert everyone's steps; your own Ctrl+Z still works.
 
 ## MCP servers
 
@@ -254,7 +259,8 @@ The essentials are provider, URL, key and model. Everything else has defaults un
 |---|---|---|
 | Ask before running Python | Off | Shows each script and waits for approval |
 | Let the AI see the viewport | On | Sends a screenshot after steps that change the scene |
-| Max steps | 60 | Model turns per request before it pauses; send a message to continue |
+| Max steps | 0 (no limit) | Model turns per request before the main agent pauses; send a message to continue. Sub-agents have no step limit |
+| Sub-agents at once | 8 | How many sub-agents work at the same time (1-16); more is faster but sends more requests at once |
 | Pack textures into the .blend | On | Stores generated and imported images inside the file |
 | Texture folder / Normal maps | extension folder / OpenGL | |
 | Refusal fallback | On | Anthropic first-party API only |

@@ -114,6 +114,35 @@ def loaded_and_each_agent_gets_its_toolset() -> None:
 
 
 @case
+def subagent_setting_matches_the_limits() -> None:
+    from blender_ai import preferences
+    from blender_ai.agent import roles
+    from blender_ai.agent.config import AgentConfig
+
+    steps = preferences.BlenderAIPreferences.bl_rna.properties["max_steps"]
+    assert steps.default == AgentConfig("OPENAI", "", "", "m").max_steps == 0, "no step limit unless the user sets one"
+    prop = preferences.BlenderAIPreferences.bl_rna.properties["parallel_agents"]
+    assert (prop.default, prop.hard_min, prop.hard_max) == (roles.DEFAULT_PARALLEL, 1, roles.MAX_PARALLEL), (prop.default, prop.hard_max)
+
+
+@case
+def prompts_name_only_tools_the_agent_has() -> None:
+    import re
+
+    from blender_ai.agent import roles
+
+    session = state.get().session
+    known = {s.name for s in registry.REGISTRY.specs()} | {roles.SPAWN_TOOL}
+    conditional = {"bmesh_boolean", "mpfb_create_human"}
+    for role in roles.ROLES.values():
+        tools = {s.name for s in session._toolset(role, 0)}
+        named = set(re.findall(r"\b[a-z]+(?:_[a-z0-9]+)+\b", role.system_prompt)) & known
+        assert len(named) > 5, (role.name, sorted(named))
+        stray = named - tools - conditional
+        assert not stray, f"{role.name}'s prompt names tools it doesn't have: {sorted(stray)}"
+
+
+@case
 def primitives_and_transforms() -> None:
     fresh()
     for kind in ("cube", "uv_sphere", "ico_sphere", "cylinder", "cone", "torus", "plane", "grid", "circle", "monkey", "empty", "text", "bezier_curve"):

@@ -16,6 +16,8 @@ from .messages import AgentError, AgentEvent, ToolResult, UserTurn
 DEFAULT_BASE_URL = ANTHROPIC_URL
 OFFICIAL_HOSTS = frozenset({"api.anthropic.com"})
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CONTEXT_BETA = "context-management-2025-06-27"
+USAGE_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 MAX_JSON_RETRIES = 2
 CANCELLED = "Cancelled by the user before this tool ran."
 
@@ -39,22 +41,51 @@ def tool_param(spec: ToolSpec) -> dict[str, Any]:
     return {"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
 
 
+def clearing(cfg: AgentConfig, tools: Sequence[ToolSpec]) -> dict[str, Any]:
+    window = cfg.context_window
+    edit: dict[str, Any] = {
+        "type": "clear_tool_uses_20250919",
+        "trigger": {"type": "input_tokens", "value": history.clear_trigger(window)},
+        "keep": {"type": "tool_uses", "value": history.CLEAR_KEEP},
+        "clear_at_least": {"type": "input_tokens", "value": history.clear_at_least(window)},
+        "clear_tool_inputs": True,
+    }
+    if kept := sorted(history.KEPT_TOOLS & {s.name for s in tools}):
+        edit["exclude_tools"] = kept
+    return {"edits": [edit]}
+
+
 def build_request(cfg: AgentConfig, *, system: str, tools: Sequence[ToolSpec], messages: list[dict[str, Any]], level: str | None = None) -> dict[str, Any]:
     caps = models.anthropic_caps(cfg.model, cfg.model_info)
     official = is_official(cfg.base_url)
     params: dict[str, Any] = {"model": cfg.model, "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}], "messages": messages}
     params.update(models.anthropic_params(caps, level or cfg.reasoning))
     tool_params = [tool_param(s) for s in tools]
+    betas: list[str] = []
     if official:
         for t in tool_params:
             t["eager_input_streaming"] = True
         params["cache_control"] = {"type": "ephemeral"}
     if tool_params:
         params["tools"] = tool_params
+        if official:
+            params["context_management"] = clearing(cfg, tools)
+            betas.append(CONTEXT_BETA)
     if cfg.use_fallbacks and caps.fallbacks and official:
         params["fallbacks"] = "default"
-        params["betas"] = [FALLBACK_BETA]
+        betas.append(FALLBACK_BETA)
+    if betas:
+        params["betas"] = betas
     return params
+
+
+def usage_total(usage: Any) -> int:
+    return sum(getattr(usage, key, 0) or 0 for key in USAGE_KEYS)
+
+
+def thinking_rejected(exc: AgentError) -> bool:
+    text = str(exc).lower()
+    return exc.kind == "bad_request" and "thinking" in text and ("signature" in text or "conversation" in text)
 
 
 def map_error(exc: BaseException, url: str) -> AgentError:
@@ -116,6 +147,10 @@ class AnthropicAgent:
         self._lock = threading.Lock()
         self._client: Any = None
         self._prefix: tuple[Any, ...] | None = None
+        self._tokens: int | None = None
+        self._counted = 0
+        self._strip_on_clear = False
+        self._compact_failed = False
 
     @property
     def has_history(self) -> bool:
@@ -125,6 +160,7 @@ class AnthropicAgent:
         with self._lock:
             self.messages = []
             self._prefix = None
+            self._tokens = None
 
     def run(self, run: Any, turn: UserTurn) -> str:
         with self._lock:
@@ -136,10 +172,9 @@ class AnthropicAgent:
             if self._prefix is not None and prefix != self._prefix:
                 self._drop_thinking()
             self._prefix = prefix
+            self._compact_failed = False
 
             content: list[dict[str, Any]] = []
-            if history.needs_compaction(self.messages, cfg.context_window) and (summary := self._compact(run, cfg)):
-                content.append({"type": "text", "text": history.summary_turn(summary)})
             if turn.snapshot:
                 content.append({"type": "text", "text": f"<scene>\n{turn.snapshot}\n</scene>"})
             if turn.attachment is not None and cfg.vision:
@@ -148,7 +183,7 @@ class AnthropicAgent:
             self.messages.append({"role": "user", "content": content})
             note = history.FAILED
             try:
-                reply = self._loop(run, cfg)
+                reply = self._loop(run, cfg, turn)
                 note = history.STOPPED
                 return reply
             except AgentError as exc:
@@ -157,33 +192,41 @@ class AnthropicAgent:
             finally:
                 self._close(history.STOPPED if run.cancelled else note)
 
-    def _loop(self, run: Any, cfg: AgentConfig) -> str:
+    def _loop(self, run: Any, cfg: AgentConfig, turn: UserTurn) -> str:
         vision = cfg.vision
         steps = 0
         turn_no = 0
+        working = False
         while not run.cancelled:
-            if steps >= cfg.max_steps:
+            if cfg.max_steps and steps >= cfg.max_steps:
                 raise AgentError(f"Paused after {steps} steps (the limit in settings). Send a message to continue.", "paused")
             steps += 1
             turn_no += 1
             level = cfg.effort()
+            self._tidy(run, cfg, turn, working)
             params = build_request(cfg, system=run.system, tools=run.tools, messages=list(self.messages), level=level)
             try:
                 message = self._stream(params, run, turn_no)
             except AgentError as exc:
-                if exc.kind != "bad_request" or "effort" not in str(exc).lower() or level == "auto":
+                if thinking_rejected(exc) and self._has_thinking():
+                    self._drop_thinking()
+                    self._strip_on_clear = True
+                elif exc.kind != "bad_request" or "effort" not in str(exc).lower() or level == "auto":
                     raise
-                run.emit(AgentEvent("info", text=cfg.reject_effort(level)))
+                else:
+                    run.emit(AgentEvent("info", text=cfg.reject_effort(level)))
                 steps -= 1
                 turn_no -= 1
                 continue
             if message is None:
                 return ""
+            working = True
             blocks = [block.to_dict() for block in message.content]
             self.messages.append({"role": "assistant", "content": blocks})
             usage = getattr(message, "usage", None)
             if usage is not None:
                 run.emit(AgentEvent("usage", usage=usage.to_dict()))
+                self._tokens, self._counted = usage_total(usage) or None, len(self.messages)
 
             calls = [b for b in blocks if b.get("type") == "tool_use"]
             reason = message.stop_reason
@@ -206,25 +249,52 @@ class AnthropicAgent:
                 results.append(self._result_block(call["id"], result, vision))
             image = run.feedback() if vision and not run.cancelled else None
             if image is not None:
-                results += [{"type": "text", "text": "Viewport after these changes:"}, image_block(image)]
+                results[-1]["content"] += [{"type": "text", "text": "Viewport after these changes:"}, image_block(image)]
             self.messages.append({"role": "user", "content": results})
         return ""
 
-    def _compact(self, run: Any, cfg: AgentConfig) -> str:
+    def _size(self, run: Any) -> int:
+        if self._tokens is None:
+            return history.fixed_tokens(run.system, run.tools) + history.estimate_tokens(self.messages)
+        return self._tokens + history.fresh_tokens(self.messages[self._counted :])
+
+    def _tidy(self, run: Any, cfg: AgentConfig, turn: UserTurn, working: bool) -> None:
+        window = cfg.context_window
+        tokens = self._size(run)
+        if not is_official(cfg.base_url) and tokens > history.clear_trigger(window) and (ids := history.plan_clear(self.messages, window)):
+            before = self.messages
+            self.messages = history.clear(before, ids)
+            tokens -= history.estimate_tokens(before) - history.estimate_tokens(self.messages)
+            if self._strip_on_clear:
+                self._drop_thinking(history.first_change(before, self.messages))
+            self._tokens, self._counted = tokens, len(self.messages)
+        reserve = models.anthropic_params(models.anthropic_caps(cfg.model, cfg.model_info), cfg.effort())["max_tokens"]
+        if not self._compact_failed and history.needs_compaction(self.messages, window, tokens, reserve):
+            self._compact(run, cfg, turn, working)
+
+    def _compact(self, run: Any, cfg: AgentConfig, turn: UserTurn, working: bool) -> None:
+        older = self.messages if working else self.messages[:-1]
+        if not older:
+            return
         params = models.anthropic_params(models.anthropic_caps(cfg.model, cfg.model_info), "low", 8000)
-        request = [{"role": "user", "content": history.summary_prompt(self.messages, cfg.context_window)}]
+        request = [{"role": "user", "content": history.summary_prompt(older, cfg.context_window)}]
         try:
             message = self._client.messages.create(model=cfg.model, system=history.SUMMARY_SYSTEM, messages=request, **params)
         except Exception as exc:
+            self._compact_failed = True
             run.emit(AgentEvent("info", text=history.compact_failed(str(map_error(exc, cfg.base_url)))))
-            return ""
+            return
         if getattr(message, "usage", None) is not None:
             run.emit(AgentEvent("usage", usage=message.usage.to_dict()))
         summary = _final_text([block.to_dict() for block in message.content])
-        if summary:
-            self.messages = []
-            run.emit(AgentEvent("info", text=history.COMPACTED))
-        return summary
+        if not summary:
+            self._compact_failed = True
+            return
+        lead = {"type": "text", "text": history.summary_turn(summary)}
+        rest = [{"type": "text", "text": history.resume_turn(turn.text, run.scene())}] if working else self.messages[-1]["content"]
+        self.messages = [{"role": "user", "content": [lead, *rest]}]
+        self._tokens = None
+        run.emit(AgentEvent("info", text=history.COMPACTED))
 
     def _close(self, note: str) -> None:
         if self.messages and self.messages[-1]["role"] == "user":
@@ -263,8 +333,16 @@ class AnthropicAgent:
                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": c["id"], "content": text, "is_error": True} for c in calls]}
             )
 
-    def _drop_thinking(self) -> None:
-        for message in self.messages:
+    def _has_thinking(self) -> bool:
+        return any(
+            isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking")
+            for m in self.messages
+            if m["role"] == "assistant" and isinstance(m["content"], list)
+            for b in m["content"]
+        )
+
+    def _drop_thinking(self, start: int = 0) -> None:
+        for message in self.messages[start:]:
             if message["role"] == "assistant" and isinstance(message["content"], list):
                 message["content"] = [b for b in message["content"] if b.get("type") not in ("thinking", "redacted_thinking")] or [
                     {"type": "text", "text": "(no text)"}
